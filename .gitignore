@@ -1,0 +1,40 @@
+# Environment
+.env
+venv/
+env/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Models & Weights (too large for git)
+weights/*.pt
+weights/*.onnx
+weights/*.engine
+weights/*.yaml
+models_cache/
+
+# Logs & Debug
+logs/
+debug/
+*.log
+
+# Test outputs
+tests/output/
+.pytest_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.bak
