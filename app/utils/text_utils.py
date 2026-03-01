@@ -41,10 +41,12 @@ def clean_field(text: str, field_type: str) -> str:
         ]:
             text = text.replace(wrong, right)
 
-    # Arabic text fields
+    # Arabic text fields - keep both Arabic AND English (names can be in either)
     elif field_type in ["firstName", "lastName", "address", "add_line_1", "add_line_2"]:
-        # Keep only Arabic chars and spaces
-        pattern = f"[^{ARABIC_CHARS}\\s]"
+        # Keep Arabic, English letters, and spaces
+        # Arabic: \u0600-\u06ff\u0750-\u077f\u08a0-\u08ff\ufb50-\ufdff\ufe70-\ufeff
+        # English: A-Za-z
+        pattern = f"[^\u0600-\u06ff\u0750-\u077f\u08a0-\u08ff\ufb50-\ufdff\ufe70-\ufeffa-zA-Z\\s]"
         text = re.sub(pattern, "", text)
         text = re.sub(r"\s+", " ", text).strip()
 
