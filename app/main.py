@@ -41,27 +41,6 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title=settings.APP_TITLE,
     version=settings.APP_VERSION,
-    description="""
-    ## Egyptian National ID OCR API
-    
-    Extract information from Egyptian National ID cards using OCR.
-    
-    ### Features
-    - Card detection and perspective correction
-    - Field-specific OCR (Arabic, English, Digits)
-    - National ID number parsing (birth date, gender, governorate)
-    - Confidence scoring for each extracted field
-    - CPU-optimized for offline deployment
-    
-    ### Supported Fields
-    - **name_ar**: Name in Arabic
-    - **name_en**: Name in English  
-    - **id_number**: 14-digit National ID
-    - **birth_date**: Date of birth
-    - **gender**: Gender (male/female)
-    - **nationality**: Nationality
-    - **address**: Address (from back of card)
-    """,
     lifespan=lifespan,
     docs_url="/docs",
     redoc_url="/redoc",
