@@ -61,7 +61,26 @@ class IDExtractionPipeline:
             return
 
         logger.info("Initializing ID Extraction Pipeline...")
+
+        # Auto-initialize models if not already done
+        if IDExtractionPipeline._detector is None:
+            logger.info("Loading detection models...")
+            try:
+                IDExtractionPipeline._detector = EgyptianIDDetector()
+            except Exception as e:
+                logger.warning(f"Could not load detector: {e}")
+                IDExtractionPipeline._detector = None
+
+        if IDExtractionPipeline._ocr is None:
+            logger.info("Loading OCR models...")
+            try:
+                IDExtractionPipeline._ocr = OCREngine()
+            except Exception as e:
+                logger.warning(f"Could not load OCR: {e}")
+                IDExtractionPipeline._ocr = None
+
         self._initialized = True
+        logger.info("Pipeline initialized")
 
     @classmethod
     def initialize(cls):
