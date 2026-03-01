@@ -106,11 +106,11 @@ class IDExtractionPipeline:
             logger.error(f"Failed to decode image: {e}")
             return {"error": f"Failed to decode image: {str(e)}", "processing_ms": 0}
 
-        # 2. Preprocess (deskew)
-        try:
-            image = deskew(image)
-        except Exception as e:
-            logger.warning(f"Deskew failed: {e}")
+        # 2. Preprocess (deskew) - temporarily disabled, causes issues
+        # try:
+        #     image = deskew(image)
+        # except Exception as e:
+        #     logger.warning(f"Deskew failed: {e}")
 
         # 3. Detect card (if detector available)
         card_image = image

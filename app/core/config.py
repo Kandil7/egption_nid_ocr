@@ -8,14 +8,23 @@ from pydantic import Field
 from pathlib import Path
 
 
-# Field classes based on NASO7Y project
-# Source: https://github.com/NASO7Y/OCR_Egyptian_ID
+# Field classes based on ACTUAL NASO7Y model classes
+# Source: Model file weights/detect_odjects.pt
 NASO7Y_CLASSES = {
-    0: "firstName",  # First name (Arabic)
-    1: "lastName",  # Last name (Arabic)
-    2: "serial",  # Serial number
-    3: "address",  # Address
-    4: "nid",  # National ID number
+    0: "address",
+    4: "firstName",
+    24: "lastName",
+    29: "serial",
+    25: "nid",
+    # Additional classes from model
+    1: "demo",
+    2: "dob",
+    3: "expiry",
+    5: "front_logo",
+    26: "nid_back",
+    27: "photo",
+    28: "poe",
+    30: "watermark_tut",
 }
 
 # Canonical field mapping (our internal names -> NASO7Y names)

@@ -318,6 +318,7 @@ def extract_all_rois(card_image: np.ndarray, side: str = "front") -> dict[str, n
 def preprocess_text_field(image: np.ndarray, field_type: str = "arabic") -> np.ndarray:
     """
     Preprocess field image based on field type for optimal OCR.
+    Uses LIGHT preprocessing - let EasyOCR do most of the work.
 
     Args:
         image: Input image
@@ -338,43 +339,47 @@ def preprocess_text_field(image: np.ndarray, field_type: str = "arabic") -> np.n
         scale = 64 / h
         gray = cv2.resize(gray, (int(w * scale), 64), interpolation=cv2.INTER_CUBIC)
 
-    # Field-specific preprocessing
-    if field_type in ["nid", "front_nid", "back_nid", "serial", "serial_num", "issue_code"]:
-        # ID numbers: sharp threshold + morphological cleanup
-        _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        kernel = np.ones((2, 2), np.uint8)
-        binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
-        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
-        return binary
+    # Light preprocessing - just upscale, let EasyOCR handle the rest
+    # Heavy binarization hurts EasyOCR performance
 
+    # For NID/serial fields - slight enhancement only
+    if field_type in ["nid", "front_nid", "back_nid", "serial", "serial_num", "issue_code"]:
+        # Just upscale, no binarization
+        if h < 100:
+            scale = 100 / h
+            gray = cv2.resize(gray, (int(w * scale), 100), interpolation=cv2.INTER_CUBIC)
+        return gray
+
+    # For Arabic text (names, address) - slight denoise only
     elif field_type in ["firstName", "lastName", "address", "add_line_1", "add_line_2"]:
-        # Arabic text: Adaptive threshold
-        denoised = cv2.fastNlMeansDenoising(gray, h=10)
-        binary = cv2.adaptiveThreshold(
-            denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 15, 8
-        )
-        # Dilation to connect Arabic letters
-        kernel = np.ones((1, 2), np.uint8)
-        binary = cv2.dilate(binary, kernel, iterations=1)
-        return binary
+        # Light denoising, no binarization
+        denoised = cv2.fastNlMeansDenoising(gray, h=5)
+        if h < 100:
+            scale = 100 / h
+            denoised = cv2.resize(denoised, (int(w * scale), 100), interpolation=cv2.INTER_CUBIC)
+        return denoised
 
     elif field_type in ["issue_date", "expiry_date", "dob"]:
-        # Dates: Otsu threshold
-        _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        return binary
+        # Light processing for dates
+        if h < 100:
+            scale = 100 / h
+            gray = cv2.resize(gray, (int(w * scale), 100), interpolation=cv2.INTER_CUBIC)
+        return gray
 
     elif field_type == "face":
-        # Photo: no binarization
+        # Photo: return original
         return cv2.cvtColor(image, cv2.COLOR_BGR2RGB) if len(image.shape) == 3 else image
 
     elif field_type in ["front_logo", "back_logo"]:
-        # Logos: no processing needed
+        # Logos: return grayscale
         return gray
 
     else:
-        # Default: Otsu threshold
-        _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        return binary
+        # Default: light processing
+        if h < 100:
+            scale = 100 / h
+            gray = cv2.resize(gray, (int(w * scale), 100), interpolation=cv2.INTER_CUBIC)
+        return gray
 
 
 def remove_background_lines(image: np.ndarray) -> np.ndarray:
