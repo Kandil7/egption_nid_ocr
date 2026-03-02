@@ -10,10 +10,7 @@ __pycache__/
 .Python
 
 # Models & Weights (too large for git)
-weights/*.pt
-weights/*.onnx
-weights/*.engine
-weights/*.yaml
+
 models_cache/
 
 # Logs & Debug
