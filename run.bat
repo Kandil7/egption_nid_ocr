@@ -50,6 +50,6 @@ echo.
 echo Press Ctrl+C to stop the server
 echo.
 
-call venv\Scripts\python.exe -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8001
+call venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 8001
 
 pause

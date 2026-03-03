@@ -19,6 +19,7 @@ class OCRMode(str, Enum):
     """OCR engine modes."""
 
     EASYOCR = "easyocr"
+    PADDLE_AR = "paddle_ar"
 
 
 @dataclass
@@ -114,6 +115,169 @@ class EasyOCREngine:
             return OCRResult(text="", confidence=0.0, engine_used=OCRMode.EASYOCR, latency_ms=0)
 
 
+class PaddleOCREngine:
+    """
+    PaddleOCR-based recognizer.
+
+    We use:
+      - Arabic model for Arabic / mixed-name and address fields.
+      - Optionally English/multilingual models for other fields in future.
+
+    Detection is handled separately (YOLO / template ROIs), so we only enable recognition here.
+    """
+
+    def __init__(self) -> None:
+        """Initialize PaddleOCR engines."""
+        self._ar_reader = None
+        self._digit_reader = None
+
+        try:
+            from paddleocr import PaddleOCR  # type: ignore
+
+            use_gpu = bool(getattr(settings, "PADDLE_USE_GPU", False))
+
+            # Arabic text recognizer (names, address)
+            logger.info("Loading PaddleOCR Arabic recognizer (PP-OCRv3/PP-OCRv4 mobile)...")
+            ar_kwargs = dict(
+                lang="ar",
+                use_angle_cls=False,
+                det=False,
+                rec=True,
+                use_gpu=use_gpu,
+                show_log=False,
+            )
+            if getattr(settings, "PADDLE_AR_REC_MODEL_DIR", ""):
+                ar_kwargs["rec_model_dir"] = settings.PADDLE_AR_REC_MODEL_DIR
+            self._ar_reader = PaddleOCR(**ar_kwargs)
+            logger.info("PaddleOCR Arabic recognizer ready")
+
+            # Digit / Latin recognizer (PP-OCRv4 mobile_rec)
+            logger.info("Loading PaddleOCR digit/Latin recognizer (PP-OCRv4 mobile_rec)...")
+            digit_kwargs = dict(
+                det=False,
+                rec=True,
+                use_angle_cls=False,
+                use_gpu=use_gpu,
+                show_log=False,
+            )
+            if getattr(settings, "PADDLE_DIGIT_REC_MODEL_DIR", ""):
+                digit_kwargs["rec_model_dir"] = settings.PADDLE_DIGIT_REC_MODEL_DIR
+            self._digit_reader = PaddleOCR(**digit_kwargs)
+            logger.info("PaddleOCR digit/Latin recognizer ready")
+        except Exception as e:
+            logger.warning(f"Could not initialize PaddleOCR engines: {e}")
+            self._ar_reader = None
+            self._digit_reader = None
+
+    def available(self) -> bool:
+        """Return True if at least one PaddleOCR reader is ready."""
+        return self._ar_reader is not None or self._digit_reader is not None
+
+    def run_arabic(self, image_np: np.ndarray) -> OCRResult:
+        """Run Arabic recognition on a cropped field image."""
+        t0 = time.time()
+
+        if self._ar_reader is None:
+            return OCRResult(
+                text="",
+                confidence=0.0,
+                engine_used=OCRMode.PADDLE_AR,
+                latency_ms=0,
+            )
+
+        try:
+            # PaddleOCR accepts numpy arrays directly.
+            # We disable detection (det=False in constructor) and let it only run recognition.
+            ocr_out = self._ar_reader.ocr(image_np, cls=False)
+
+            texts = []
+            confs = []
+
+            # ocr_out is typically: [[ [box], (text, score) ], ... ]
+            for line in ocr_out:
+                for box, (txt, score) in line:
+                    if txt:
+                        texts.append(txt)
+                        confs.append(float(score))
+
+            text = " ".join(texts)
+            conf = float(np.mean(confs)) if confs else 0.0
+
+            return OCRResult(
+                text=text,
+                confidence=conf,
+                engine_used=OCRMode.PADDLE_AR,
+                latency_ms=int((time.time() - t0) * 1000),
+            )
+        except Exception as e:
+            logger.error(f"PaddleOCR Arabic error: {e}")
+            return OCRResult(
+                text="",
+                confidence=0.0,
+                engine_used=OCRMode.PADDLE_AR,
+                latency_ms=int((time.time() - t0) * 1000),
+            )
+
+    def run_digits(self, image_np: np.ndarray) -> OCRResult:
+        """Run digit / Latin recognition on a cropped field image using PP-OCRv4-style model."""
+        t0 = time.time()
+
+        if self._digit_reader is None:
+            return OCRResult(
+                text="",
+                confidence=0.0,
+                engine_used=OCRMode.PADDLE_AR,
+                latency_ms=0,
+            )
+
+        try:
+            ocr_out = self._digit_reader.ocr(image_np, cls=False)
+
+            # Some PaddleOCR versions may return None or an empty list on failure.
+            if not ocr_out:
+                return OCRResult(
+                    text="",
+                    confidence=0.0,
+                    engine_used=OCRMode.PADDLE_AR,
+                    latency_ms=int((time.time() - t0) * 1000),
+                )
+
+            texts = []
+            confs = []
+            for line in ocr_out:
+                if not line:
+                    continue
+                for item in line:
+                    if not item or len(item) < 2:
+                        continue
+                    # item is typically: [box, (text, score)]
+                    box, result = item[0], item[1]
+                    if not result or len(result) < 2:
+                        continue
+                    txt, score = result[0], result[1]
+                    if txt:
+                        texts.append(txt)
+                        confs.append(float(score))
+
+            text = " ".join(texts)
+            conf = float(np.mean(confs)) if confs else 0.0
+
+            return OCRResult(
+                text=text,
+                confidence=conf,
+                engine_used=OCRMode.PADDLE_AR,
+                latency_ms=int((time.time() - t0) * 1000),
+            )
+        except Exception as e:
+            logger.error(f"PaddleOCR digit/Latin error: {e}")
+            return OCRResult(
+                text="",
+                confidence=0.0,
+                engine_used=OCRMode.PADDLE_AR,
+                latency_ms=int((time.time() - t0) * 1000),
+            )
+
+
 class OCREngine:
     """
     Unified OCR engine using EasyOCR.
@@ -121,6 +285,7 @@ class OCREngine:
 
     _instance = None
     _easy: Optional[EasyOCREngine] = None
+    _paddle: Optional[PaddleOCREngine] = None
 
     def __new__(cls):
         """Singleton pattern - ensure only one instance exists."""
@@ -136,8 +301,19 @@ class OCREngine:
 
         logger.info("Initializing OCR Engine...")
 
-        # Initialize EasyOCR
+        # Initialize EasyOCR (digits + fallback)
         self._easy = EasyOCREngine()
+
+        # Initialize PaddleOCR (Arabic names, address)
+        try:
+            paddle_engine = PaddleOCREngine()
+            if paddle_engine.available():
+                self._paddle = paddle_engine
+            else:
+                self._paddle = None
+        except Exception as e:
+            logger.warning(f"Failed to initialize PaddleOCR engine: {e}")
+            self._paddle = None
 
         self._initialized = True
         logger.info("OCR Engine ready")
@@ -146,19 +322,36 @@ class OCREngine:
         """
         Run OCR on a field.
 
-        Args:
-            image: Field image
-            field_name: Name of the field
-
-        Returns:
-            OCRResult with extracted text and metadata
+        Strategy:
+          - Digit-only fields (NID, serial, codes): EasyOCR with numeric allowlist.
+          - Arabic-rich text fields (names, addresses): Prefer PaddleOCR Arabic; fall back to EasyOCR.
+          - Other fields: EasyOCR default.
         """
-        # Determine if this is a digit-only field
-        digits_only = field_name in ["nid", "serial", "serial_num", "issue_code"]
+        # Digit-only fields → EasyOCR with allowlist
+        digit_fields = {"nid", "front_nid", "back_nid", "id_number", "serial", "serial_num", "issue_code"}
+        arabic_fields = {"firstName", "lastName", "name_ar", "address", "add_line_1", "add_line_2", "nationality"}
 
-        # Run OCR
+        if field_name in digit_fields:
+            # Prefer Paddle digit recognizer (PP-OCRv4 mobile_rec or custom) if available
+            if self._paddle and self._paddle._digit_reader is not None:
+                result = self._paddle.run_digits(image)
+                if result.text:
+                    return result
+            # Fallback to EasyOCR with numeric allowlist
+            if self._easy:
+                return self._easy.run(image, digits_only=True)
+            return OCRResult(text="", confidence=0.0, engine_used=OCRMode.EASYOCR, latency_ms=0)
+
+        # Arabic / mixed-name/address fields → PaddleOCR Arabic first
+        if field_name in arabic_fields and self._paddle and self._paddle.available():
+            paddle_result = self._paddle.run_arabic(image)
+            # If Paddle returns something with non-zero confidence, use it
+            if paddle_result.text and paddle_result.confidence > 0:
+                return paddle_result
+
+        # Fallback / default path → EasyOCR without digit-only restriction
         if self._easy:
-            return self._easy.run(image, digits_only=digits_only)
+            return self._easy.run(image, digits_only=False)
 
         return OCRResult(text="", confidence=0.0, engine_used=OCRMode.EASYOCR, latency_ms=0)
 
@@ -166,4 +359,6 @@ class OCREngine:
         """Check which engines are available."""
         return {
             "easyocr": self._easy is not None and self._easy.reader is not None,
+            "paddle_ar": self._paddle is not None and self._paddle._ar_reader is not None,
+            "paddle_digits": self._paddle is not None and self._paddle._digit_reader is not None,
         }

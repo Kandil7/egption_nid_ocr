@@ -14,9 +14,14 @@ from app.models.id_parser import parse_national_id
 from app.utils.image_utils import (
     decode_image,
     deskew,
-    full_preprocess_pipeline,
     extract_all_rois,
     preprocess_text_field,
+    resize_to_standard,
+    remove_noise,
+    enhance_contrast,
+    auto_detect_and_warp,
+    remove_background_lines,
+    detect_card_side,
 )
 from app.utils.text_utils import clean_field
 from app.core.config import settings
@@ -147,15 +152,28 @@ class IDExtractionPipeline:
             except Exception as e:
                 logger.warning(f"Field detection failed: {e}")
 
-        # 5. Extract ROIs (fallback to coordinates)
+        # 5. Extract ROIs (fallback to template-based layout on normalized card)
         if not yolo_fields:
             try:
-                from app.utils.image_utils import detect_card_side
+                # Layout-aware preprocessing for fallback path:
+                # - Resize to canonical width
+                # - Denoise & enhance contrast
+                # - Perspective correction & deskew
+                # - Background line removal
+                normalized = resize_to_standard(card_image, target_width=settings.TARGET_IMAGE_WIDTH)
+                normalized = remove_noise(normalized)
+                normalized = enhance_contrast(normalized)
+                normalized = auto_detect_and_warp(normalized)
+                normalized = remove_background_lines(normalized)
 
-                side = detect_card_side(card_image)
-                yolo_fields = extract_all_rois(card_image, side=side)
-                # Convert to tuple format for OCR
-                yolo_fields = {k: (v, 0.5) for k, v in yolo_fields.items()}
+                # Detect side (front/back) on normalized card and use template ROIs
+                side = detect_card_side(normalized)
+                logger.info(f"Template ROI fallback using side='{side}'")
+                template_rois = extract_all_rois(normalized, side=side)
+
+                # Convert to tuple format for OCR, assign mid-level detection confidence
+                yolo_fields = {k: (v, 0.5) for k, v in template_rois.items()}
+                card_image = normalized
             except Exception as e:
                 logger.warning(f"ROI extraction failed: {e}")
                 yolo_fields = {}
