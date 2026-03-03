@@ -323,21 +323,20 @@ class OCREngine:
         Run OCR on a field.
 
         Strategy:
-          - Digit-only fields (NID, serial, codes): EasyOCR with numeric allowlist.
+          - Digit-only fields (NID, serial, codes): Prefer Paddle digits (PP-OCRv4-style); fall back to EasyOCR only if Paddle is unavailable.
           - Arabic-rich text fields (names, addresses): Prefer PaddleOCR Arabic; fall back to EasyOCR.
           - Other fields: EasyOCR default.
         """
-        # Digit-only fields → EasyOCR with allowlist
         digit_fields = {"nid", "front_nid", "back_nid", "id_number", "serial", "serial_num", "issue_code"}
         arabic_fields = {"firstName", "lastName", "name_ar", "address", "add_line_1", "add_line_2", "nationality"}
 
+        # Digit-only fields
         if field_name in digit_fields:
             # Prefer Paddle digit recognizer (PP-OCRv4 mobile_rec or custom) if available
             if self._paddle and self._paddle._digit_reader is not None:
-                result = self._paddle.run_digits(image)
-                if result.text:
-                    return result
-            # Fallback to EasyOCR with numeric allowlist
+                # Always return Paddle result to avoid extra EasyOCR cost
+                return self._paddle.run_digits(image)
+            # Fallback to EasyOCR with numeric allowlist if Paddle digits are unavailable
             if self._easy:
                 return self._easy.run(image, digits_only=True)
             return OCRResult(text="", confidence=0.0, engine_used=OCRMode.EASYOCR, latency_ms=0)

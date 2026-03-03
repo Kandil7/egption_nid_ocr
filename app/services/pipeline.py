@@ -184,11 +184,31 @@ class IDExtractionPipeline:
                 "processing_ms": int((time.time() - start_time) * 1000),
             }
 
-        # 6. OCR for each field
-        extracted = {}
-        confidence_scores = {}
+        # 6. OCR for each field (only for essential fields)
+        extracted: Dict[str, str] = {}
+        confidence_scores: Dict[str, float] = {}
+
+        # Fields we actually OCR to reduce runtime
+        ocr_fields = {
+            "nid",
+            "id_number",
+            "front_nid",
+            "back_nid",
+            "firstName",
+            "lastName",
+            "address",
+            "add_line_1",
+            "add_line_2",
+            "serial",
+            "serial_num",
+            "issue_date",
+            "expiry_date",
+        }
 
         for field_name, (field_img, det_conf) in yolo_fields.items():
+            # Skip non-essential ROIs (logos, photo, watermarks, etc.) to save OCR time
+            if field_name not in ocr_fields:
+                continue
             try:
                 # Preprocess for OCR
                 processed = preprocess_text_field(field_img, field_type=field_name)

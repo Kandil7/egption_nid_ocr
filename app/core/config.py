@@ -98,13 +98,15 @@ class Settings(BaseSettings):
     RECTIFIED_SIZE: tuple = Field(
         default=(1024, 640), description="Rectified card size (width, height)"
     )
+    TARGET_IMAGE_WIDTH: int = Field(
+        default=900, description="Target width for image resizing and normalization"
+    )
 
     # Image Validation Settings
     MAX_IMAGE_SIZE_MB: int = Field(default=10, description="Maximum allowed image size in MB")
     MIN_QUALITY_SCORE: float = Field(
         default=0.35, description="Minimum acceptable image quality score"
     )
-    TARGET_IMAGE_WIDTH: int = Field(default=1200, description="Target width for image resizing")
 
     # Logging Settings
     LOG_LEVEL: str = Field(
