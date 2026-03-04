@@ -28,6 +28,7 @@ pydantic-settings==2.7.1
 # ─── Logging & Utils ─────────────────────────────────────
 loguru==0.7.3
 python-dotenv==1.0.1
+pytesseract==0.3.13            # Tesseract OCR wrapper
 
 # ─── Testing ─────────────────────────────────────────────
 pytest==8.3.4

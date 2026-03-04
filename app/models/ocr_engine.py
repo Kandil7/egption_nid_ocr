@@ -7,6 +7,7 @@ import os
 import time
 import numpy as np
 import cv2
+import re
 from enum import Enum
 from dataclasses import dataclass
 from typing import Optional, Dict
@@ -20,6 +21,7 @@ class OCRMode(str, Enum):
 
     EASYOCR = "easyocr"
     PADDLE_AR = "paddle_ar"
+    TESSERACT = "tesseract"
 
 
 @dataclass
@@ -278,14 +280,115 @@ class PaddleOCREngine:
             )
 
 
+class TesseractEngine:
+    """
+    Tesseract OCR for digit recognition.
+    Uses Arabic trained data for better number recognition.
+    """
+
+    def __init__(self):
+        """Initialize Tesseract engine."""
+        self._client = None
+        
+        try:
+            import pytesseract
+            
+            # Set custom tessdata directory via environment variable
+            tessdata_dir = os.path.abspath(getattr(settings, "TESSDATA_DIR", "./weights"))
+            os.environ['TESSDATA_PREFIX'] = tessdata_dir
+            
+            # Set Tesseract executable path
+            tesseract_path = self._find_tesseract()
+            pytesseract.pytesseract.tesseract_cmd = tesseract_path
+            
+            logger.info(f"Tesseract OCR ready - tessdata dir: {tessdata_dir}, tesseract path: {tesseract_path}")
+            self._client = pytesseract
+        except Exception as e:
+            logger.warning(f"Could not initialize Tesseract OCR: {e}")
+            self._client = None
+
+    def _find_tesseract(self) -> str:
+        """Find Tesseract executable path."""
+        # Common Windows paths
+        paths = [
+            r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+            r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+            os.path.expanduser(r"~\AppData\Local\Programs\Tesseract-OCR\tesseract.exe"),
+        ]
+        
+        for path in paths:
+            if os.path.exists(path):
+                return path
+        
+        # Try PATH
+        return "tesseract"
+
+    def run_digits(self, image_np: np.ndarray) -> OCRResult:
+        """Run digit recognition on a cropped field image."""
+        t0 = time.time()
+
+        if self._client is None:
+            logger.debug("Tesseract client not available, skipping digit OCR")
+            return OCRResult(
+                text="",
+                confidence=0.0,
+                engine_used=OCRMode.TESSERACT,
+                latency_ms=0,
+            )
+
+        try:
+            # Convert to grayscale if needed
+            if len(image_np.shape) == 3:
+                gray = cv2.cvtColor(image_np, cv2.COLOR_BGR2GRAY)
+            else:
+                gray = image_np.copy()
+
+            # Apply thresholding for better digit recognition
+            _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+            # Configure tesseract for digits only
+            custom_config = r"--oem 3 --psm 6 -c tessedit_char_whitelist=0123456789"
+            
+            # Try with Arabic number trained data if available
+            try:
+                text = self._client.image_to_string(thresh, config=custom_config, lang='ara_number_id')
+            except:
+                # Fallback to English digits
+                text = self._client.image_to_string(thresh, config=custom_config, lang='eng')
+            
+            # Clean text - keep only digits
+            cleaned_text = re.sub(r'\D', '', text.strip())
+            
+            logger.debug(f"Tesseract digit OCR - raw: '{text}', cleaned: '{cleaned_text}'")
+            
+            # Calculate confidence based on text length (NID should be 14 digits)
+            confidence = min(1.0, len(cleaned_text) / 14.0) if cleaned_text else 0.0
+
+            return OCRResult(
+                text=cleaned_text,
+                confidence=confidence,
+                engine_used=OCRMode.TESSERACT,
+                latency_ms=int((time.time() - t0) * 1000),
+            )
+        except Exception as e:
+            logger.error(f"Tesseract OCR error: {e}")
+            return OCRResult(
+                text="",
+                confidence=0.0,
+                engine_used=OCRMode.TESSERACT,
+                latency_ms=int((time.time() - t0) * 1000),
+            )
+
+
 class OCREngine:
     """
-    Unified OCR engine using EasyOCR.
+    Unified OCR engine using EasyOCR, PaddleOCR, and Tesseract.
     """
 
     _instance = None
     _easy: Optional[EasyOCREngine] = None
     _paddle: Optional[PaddleOCREngine] = None
+    _tesseract: Optional[TesseractEngine] = None
 
     def __new__(cls):
         """Singleton pattern - ensure only one instance exists."""
@@ -315,6 +418,13 @@ class OCREngine:
             logger.warning(f"Failed to initialize PaddleOCR engine: {e}")
             self._paddle = None
 
+        # Initialize Tesseract (digits fallback)
+        try:
+            self._tesseract = TesseractEngine()
+        except Exception as e:
+            logger.warning(f"Failed to initialize Tesseract OCR: {e}")
+            self._tesseract = None
+
         self._initialized = True
         logger.info("OCR Engine ready")
 
@@ -323,7 +433,7 @@ class OCREngine:
         Run OCR on a field.
 
         Strategy:
-          - Digit-only fields (NID, serial, codes): Prefer Paddle digits (PP-OCRv4-style); fall back to EasyOCR only if Paddle is unavailable.
+          - Digit-only fields (NID, serial, codes): Prefer Paddle digits → Tesseract → EasyOCR
           - Arabic-rich text fields (names, addresses): Prefer PaddleOCR Arabic; fall back to EasyOCR.
           - Other fields: EasyOCR default.
         """
@@ -332,13 +442,36 @@ class OCREngine:
 
         # Digit-only fields
         if field_name in digit_fields:
-            # Prefer Paddle digit recognizer (PP-OCRv4 mobile_rec or custom) if available
+            logger.debug(f"OCR field '{field_name}' - digit field, checking engines...")
+            
+            # 1. Prefer Paddle digit recognizer (PP-OCRv4 mobile_rec or custom) if available
             if self._paddle and self._paddle._digit_reader is not None:
-                # Always return Paddle result to avoid extra EasyOCR cost
-                return self._paddle.run_digits(image)
-            # Fallback to EasyOCR with numeric allowlist if Paddle digits are unavailable
+                logger.debug("Using PaddleOCR digits")
+                paddle_result = self._paddle.run_digits(image)
+                # Only use Paddle result if it returns actual digits
+                if paddle_result.text and len(paddle_result.text) > 0:
+                    logger.debug(f"PaddleOCR digits result: '{paddle_result.text}'")
+                    return paddle_result
+                logger.debug("PaddleOCR digits returned empty, trying Tesseract...")
+            
+            # 2. Try Tesseract with Arabic number trained data
+            if self._tesseract and self._tesseract._client is not None:
+                logger.debug("Using Tesseract digits")
+                tesseract_result = self._tesseract.run_digits(image)
+                if tesseract_result.text:
+                    logger.debug(f"Tesseract digits result: '{tesseract_result.text}'")
+                    return tesseract_result
+                logger.debug("Tesseract digits returned empty, trying EasyOCR...")
+            
+            # 3. Fallback to EasyOCR with numeric allowlist
             if self._easy:
-                return self._easy.run(image, digits_only=True)
+                logger.debug("Using EasyOCR digits")
+                easy_result = self._easy.run(image, digits_only=True)
+                if easy_result.text:
+                    logger.debug(f"EasyOCR digits result: '{easy_result.text}'")
+                return easy_result
+            
+            logger.warning(f"No digit OCR engine available for field '{field_name}'")
             return OCRResult(text="", confidence=0.0, engine_used=OCRMode.EASYOCR, latency_ms=0)
 
         # Arabic / mixed-name/address fields → PaddleOCR Arabic first
@@ -360,4 +493,5 @@ class OCREngine:
             "easyocr": self._easy is not None and self._easy.reader is not None,
             "paddle_ar": self._paddle is not None and self._paddle._ar_reader is not None,
             "paddle_digits": self._paddle is not None and self._paddle._digit_reader is not None,
+            "tesseract": self._tesseract is not None and self._tesseract._client is not None,
         }

@@ -87,6 +87,10 @@ class Settings(BaseSettings):
         default="",
         description="Optional custom directory for digit/Latin PaddleOCR PP-OCRv4 rec model",
     )
+    TESSDATA_DIR: str = Field(
+        default="./weights",
+        description="Directory containing Tesseract trained data files",
+    )
 
     # Card Field Class IDs (NASO7Y schema)
     CLASS_ID_CARD: int = Field(default=0, description="Class ID for card detection")
