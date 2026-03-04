@@ -22,27 +22,23 @@ def _normalize_digits(text: str) -> str:
 
 def _reorder_arabic_tokens(text: str) -> str:
     """
-    Heuristic reordering for Arabic text.
+    Reverse entire Arabic text string to correct character order.
 
-    For pure-Arabic tokens, reverse codepoint order to better match
-    expected visual order when OCR returns left-to-right sequences.
+    OCR engines scan left-to-right, but Arabic is written right-to-left.
+    This reverses the entire string to restore correct character order.
 
-    Mixed tokens (with Latin or digits) are left unchanged.
+    Example:
+        OCR returns: "رحمه" (characters reversed)
+        Output: "همحر" → displayed correctly as "رحمه"
+    
+    Note: We reverse the full string including spaces because OCR captures
+    the entire line in reverse order.
     """
     if not text:
         return text
 
-    tokens = text.split()
-    # pattern that matches tokens composed only of Arabic characters
-    arabic_only = re.compile(f"^[{ARABIC_CHARS}]+$")
-
-    reordered = []
-    for tok in tokens:
-        if arabic_only.match(tok):
-            reordered.append(tok[::-1])
-        else:
-            reordered.append(tok)
-    return " ".join(reordered)
+    # Reverse the entire text to correct Arabic character order
+    return text[::-1]
 
 
 def clean_field(text: str, field_type: str) -> str:
