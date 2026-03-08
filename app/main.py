@@ -4,9 +4,12 @@ FastAPI server for extracting information from Egyptian National ID cards.
 """
 
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.api.routes import router
 from app.services.pipeline import IDExtractionPipeline
@@ -60,6 +63,17 @@ app.add_middleware(
 # Include routers
 app.include_router(router)
 
+# Mount static files
+static_dir = Path(__file__).parent / "static"
+static_dir.mkdir(exist_ok=True)
+app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+
+
+@app.get("/debug/ocr-viewer")
+async def ocr_debug_viewer():
+    """Serve the OCR debug visualization HTML page."""
+    return FileResponse(static_dir / "ocr_debug_viewer.html")
+
 
 @app.get("/")
 async def root():
@@ -69,6 +83,7 @@ async def root():
         "version": settings.APP_VERSION,
         "docs": "/docs",
         "health": "/api/v1/health",
+        "debug_viewer": "/debug/ocr-viewer",
     }
 
 

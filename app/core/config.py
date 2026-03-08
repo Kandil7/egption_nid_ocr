@@ -8,15 +8,35 @@ from pydantic import Field
 from pathlib import Path
 
 
-# Field classes based on ACTUAL NASO7Y model classes
-# Source: Model file weights/detect_odjects.pt
+# Field classes based on ACTUAL ONNX model (weights/field_detector.onnx)
+# This is the PRIMARY model for field detection
+ONNX_FIELD_DETECTOR_CLASSES = {
+    0: "first_name",
+    1: "last_name",
+    2: "add_line_1",
+    3: "add_line_2",
+    4: "front_nid",
+    5: "back_nid",
+    6: "serial_num",
+    7: "issue_code",
+    8: "expiry_date",
+    9: "job_title",
+    10: "gender",
+    11: "religion",
+    12: "marital_status",
+    13: "face",
+    14: "front_logo",
+    15: "address",
+    16: "dob",
+}
+
+# Field classes from .pt model (weights/detect_odjects.pt) - fallback
 NASO7Y_CLASSES = {
     0: "address",
     4: "firstName",
     24: "lastName",
     29: "serial",
     25: "nid",
-    # Additional classes from model
     1: "demo",
     2: "dob",
     3: "expiry",
@@ -25,6 +45,62 @@ NASO7Y_CLASSES = {
     27: "photo",
     28: "poe",
     30: "watermark_tut",
+    6: "invalid_address",
+    7: "invalid_barcode",
+    8: "invalid_demo",
+    9: "invalid_dob",
+    10: "invalid_expiry",
+    11: "invalid_firstName",
+    12: "invalid_issue",
+    13: "invalid_job",
+    14: "invalid_lastName",
+    15: "invalid_logo",
+    16: "invalid_nid",
+    17: "invalid_nid_back",
+    18: "invalid_photo",
+    19: "invalid_poe",
+    20: "invalid_serial",
+    21: "invalid_watermark_tut",
+    22: "issue",
+    23: "job",
+}
+
+# Card detection classes (corner-based detection)
+CARD_CLASSES = {
+    0: "back-bottom",
+    1: "back-left", 
+    2: "back-right",
+    3: "back-up",
+    4: "front-bottom",
+    5: "front-left",
+    6: "front-right",
+    7: "front-up",
+}
+
+# Field name mapping (ONNX -> internal names)
+FIELD_NAME_MAP = {
+    "first_name": "firstName",
+    "last_name": "lastName",
+    "add_line_1": "add_line_1",
+    "add_line_2": "add_line_2",
+    "front_nid": "nid",
+    "back_nid": "nid",
+    "serial_num": "serial",
+    "issue_code": "issue_code",
+    "expiry_date": "expiry_date",
+    "job_title": "job_title",
+    "gender": "gender",
+    "religion": "religion",
+    "marital_status": "marital_status",
+    "face": "photo",
+    "front_logo": "front_logo",
+    "address": "address",
+    "dob": "dob",
+    # NASO7Y mappings
+    "firstName": "firstName",
+    "lastName": "lastName",
+    "nid": "nid",
+    "serial": "serial",
 }
 
 # Canonical field mapping (our internal names -> NASO7Y names)
@@ -95,7 +171,19 @@ class Settings(BaseSettings):
     # Card Field Class IDs (NASO7Y schema)
     CLASS_ID_CARD: int = Field(default=0, description="Class ID for card detection")
     CLASS_NAMES: dict = Field(
-        default=NASO7Y_CLASSES, description="Mapping of class IDs to field names (NASO7Y schema)"
+        default_factory=lambda: NASO7Y_CLASSES, description="Mapping of class IDs to field names (NASO7Y schema)"
+    )
+
+    # ONNX Field Detector Classes
+    ONNX_FIELD_DETECTOR_CLASSES: dict = Field(
+        default_factory=lambda: ONNX_FIELD_DETECTOR_CLASSES,
+        description="Mapping of class IDs to field names (ONNX model)"
+    )
+
+    # Field Name Mapping (ONNX -> internal)
+    FIELD_NAME_MAP: dict = Field(
+        default_factory=lambda: FIELD_NAME_MAP,
+        description="Mapping from ONNX/YOLO names to internal field names"
     )
 
     # Image Settings

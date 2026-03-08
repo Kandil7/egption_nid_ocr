@@ -101,6 +101,28 @@ def enhance_contrast(image: np.ndarray) -> np.ndarray:
     return cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
 
 
+def remove_shadows(image: np.ndarray) -> np.ndarray:
+    """إزالة الظلال والانعكاسات من الصورة"""
+    if len(image.shape) == 3:
+        # Process each channel or use LAB
+        lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.split(lab)
+        
+        dilated = cv2.dilate(l, np.ones((7, 7), np.uint8))
+        bg_img = cv2.medianBlur(dilated, 21)
+        diff_img = 255 - cv2.absdiff(l, bg_img)
+        norm_img = cv2.normalize(diff_img, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8UC1)
+        
+        merged = cv2.merge([norm_img, a, b])
+        return cv2.cvtColor(merged, cv2.COLOR_LAB2BGR)
+    else:
+        dilated = cv2.dilate(image, np.ones((7, 7), np.uint8))
+        bg_img = cv2.medianBlur(dilated, 21)
+        diff_img = 255 - cv2.absdiff(image, bg_img)
+        norm_img = cv2.normalize(diff_img, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8UC1)
+        return norm_img
+
+
 def sharpen_image(image: np.ndarray, strength: float = 1.5) -> np.ndarray:
     """Unsharp masking — يحسن حدة الحروف"""
     gaussian = cv2.GaussianBlur(image, (0, 0), 2.0)
@@ -257,8 +279,8 @@ FRONT_ROIS = {
     # Names (right side, upper)
     "firstName": (0.30, 0.08, 0.68, 0.20),
     "lastName": (0.30, 0.28, 0.68, 0.18),
-    # National ID (middle)
-    "nid": (0.10, 0.50, 0.80, 0.12),
+    # National ID (middle/bottom)
+    "nid": (0.30, 0.72, 0.65, 0.15),
     # Other fields
     "serial": (0.30, 0.65, 0.68, 0.10),
     "address": (0.05, 0.78, 0.90, 0.18),
@@ -282,6 +304,7 @@ BACK_ROIS = {
     # Logo placeholder
     "back_logo": (0.85, 0.02, 0.13, 0.08),
 }
+
 
 
 def extract_roi(image: np.ndarray, roi: tuple) -> np.ndarray:
@@ -325,7 +348,7 @@ def preprocess_text_field(image: np.ndarray, field_type: str = "arabic") -> np.n
         field_type: Type of field (nid, firstName, lastName, address, serial, etc.)
 
     Returns:
-        Preprocessed image ready for OCR
+        Preprocessed image ready for OCR (always BGR format)
     """
     # Convert to grayscale
     if len(image.shape) == 3:
@@ -348,7 +371,8 @@ def preprocess_text_field(image: np.ndarray, field_type: str = "arabic") -> np.n
         if h < 100:
             scale = 100 / h
             gray = cv2.resize(gray, (int(w * scale), 100), interpolation=cv2.INTER_CUBIC)
-        return gray
+        # Convert back to BGR for EasyOCR
+        return cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
 
     # For Arabic text (names, address) - slight denoise only
     elif field_type in ["firstName", "lastName", "address", "add_line_1", "add_line_2"]:
@@ -357,29 +381,30 @@ def preprocess_text_field(image: np.ndarray, field_type: str = "arabic") -> np.n
         if h < 100:
             scale = 100 / h
             denoised = cv2.resize(denoised, (int(w * scale), 100), interpolation=cv2.INTER_CUBIC)
-        return denoised
+        # Convert back to BGR
+        return cv2.cvtColor(denoised, cv2.COLOR_GRAY2BGR)
 
     elif field_type in ["issue_date", "expiry_date", "dob"]:
         # Light processing for dates
         if h < 100:
             scale = 100 / h
             gray = cv2.resize(gray, (int(w * scale), 100), interpolation=cv2.INTER_CUBIC)
-        return gray
+        return cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
 
     elif field_type == "face":
-        # Photo: return original
-        return cv2.cvtColor(image, cv2.COLOR_BGR2RGB) if len(image.shape) == 3 else image
+        # Photo: return original (already BGR)
+        return image if len(image.shape) == 3 else cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
 
     elif field_type in ["front_logo", "back_logo"]:
-        # Logos: return grayscale
-        return gray
+        # Logos: return grayscale as BGR
+        return cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
 
     else:
         # Default: light processing
         if h < 100:
             scale = 100 / h
             gray = cv2.resize(gray, (int(w * scale), 100), interpolation=cv2.INTER_CUBIC)
-        return gray
+        return cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
 
 
 def remove_background_lines(image: np.ndarray) -> np.ndarray:
@@ -482,6 +507,7 @@ def full_preprocess_pipeline(
 
     # ── 2. Resize + Basic Enhancement ──────────────────
     image = resize_to_standard(image, target_width=1200)
+    image = remove_shadows(image)
     image = remove_noise(image)
     image = enhance_contrast(image)
 
@@ -495,16 +521,16 @@ def full_preprocess_pipeline(
     side = detect_card_side(card)
     logger.info(f"Detected card side: {side}")
 
-    # ── 6. Extract ROIs ──────────────────────────────
+    # ── 6. Remove Background Lines ───────────────────
+    card_clean = remove_background_lines(card)
+
+    # ── 7. Extract ROIs ──────────────────────────────
     if use_yolo and yolo_fields:
         # استخدم YOLO للـ precision العالية
         raw_rois = yolo_fields
     else:
         # استخدم الـ relative coordinates كـ fallback
-        raw_rois = extract_all_rois(card, side=side)
-
-    # ── 7. Remove Background Lines ───────────────────
-    card_clean = remove_background_lines(card)
+        raw_rois = extract_all_rois(card_clean, side=side)
 
     # ── 8. Per-Field Preprocessing ───────────────────
     processed_rois = {}
