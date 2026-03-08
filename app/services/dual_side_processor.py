@@ -215,32 +215,57 @@ class DualSideProcessor:
     
     def _process_single_side(self, image: np.ndarray, side: str) -> Dict[str, Any]:
         """
-        Process a single side of the ID card.
-        
+        Process a single side of the ID card with side-specific field routing.
+
         Args:
             image: Image of one side
             side: "front" or "back"
-            
+
         Returns:
             Dictionary with extracted data and metadata
         """
         start_time = time.time()
-        
+        warnings = []
+
         # Preprocess the image
         try:
             normalized = self._preprocess_card(image)
         except Exception as e:
             logger.warning(f"Preprocessing failed for {side}: {e}")
             normalized = image
-        
-        # Detect fields using YOLO/ONNX
+
+        # Detect fields using YOLO/ONNX with side-aware filtering
         fields = {}
+        field_metadata = {"dual_side_indicator": False, "side_classification": {}}
+        
         if self.detector:
             try:
-                fields = self.detector.crop_fields(normalized)
+                # Use side-aware field detection - strict filter for split images
+                # since we know which side we're processing
+                fields = self.detector.crop_fields(
+                    normalized,
+                    expected_side=side,
+                    strict_side_filter=True  # Strict filtering for split images
+                )
+                
+                # Get field metadata for logging
+                if self.detector.field_detector.session is not None:
+                    detections, metadata = self.detector.detect_fields_with_metadata(
+                        normalized, expected_side=side
+                    )
+                    field_metadata = metadata
+                    
+                    # Log if unexpected fields are detected (might indicate poor split)
+                    if metadata.get("is_dual_side_indicator"):
+                        logger.warning(
+                            f"Split {side} half still shows dual-side indicators. "
+                            f"Front: {metadata['side_classification'].get('front', [])}, "
+                            f"Back: {metadata['side_classification'].get('back', [])}"
+                        )
+                        
             except Exception as e:
                 logger.warning(f"Field detection failed for {side}: {e}")
-        
+
         # Fallback to template-based ROI extraction
         if not fields:
             try:
@@ -249,19 +274,24 @@ class DualSideProcessor:
                 logger.debug(f"Using template ROIs for {side} side")
             except Exception as e:
                 logger.warning(f"Template ROI extraction failed for {side}: {e}")
-        
-        # OCR for each field
+
+        # OCR for each field with side-specific validation
         extracted = {}
         confidence_scores = {}
-        
+        field_validations = {}
+
+        # Get expected field IDs for this side
+        expected_field_ids = get_fields_for_side(side)
+        field_router = get_field_router()
+
         for field_name, (field_img, det_conf) in fields.items():
             if field_name not in self.ocr_fields:
                 continue
-            
+
             try:
                 # Preprocess for OCR
                 processed = preprocess_text_field(field_img, field_type=field_name)
-                
+
                 # Run OCR
                 if self.ocr_engine:
                     ocr_result = self.ocr_engine.ocr_field(processed, field_name)
@@ -270,32 +300,73 @@ class DualSideProcessor:
                 else:
                     text = ""
                     ocr_conf = 0.0
-                
+
                 # Clean text
                 cleaned = clean_field(text, field_name)
                 extracted[field_name] = cleaned
-                
-                # Calculate confidence
+
+                # Calculate base confidence
                 conf = (det_conf + ocr_conf) / 2 if det_conf > 0 else ocr_conf
+
+                # Boost confidence for expected fields on this side
+                onnx_id = field_router.get_onnx_class_id(field_name)
                 
+                if onnx_id is not None:
+                    # Check if field is expected for this side
+                    if is_field_expected_for_side(onnx_id, side):
+                        conf = min(1.0, conf * 1.15)  # 15% boost for expected fields
+                        logger.debug(
+                            f"[Dual-{side}] Boosted confidence for expected field "
+                            f"{field_name}: {conf:.2f}"
+                        )
+                    else:
+                        # Field not expected on this side - might be false positive
+                        conf *= 0.8  # Reduce confidence
+                        warnings.append(
+                            f"Field '{field_name}' detected on {side} side but is "
+                            f"typically on the other side"
+                        )
+                        logger.debug(
+                            f"[Dual-{side}] Reduced confidence for unexpected field "
+                            f"{field_name}: {conf:.2f}"
+                        )
+                    
+                    # Validate field value
+                    validation = validate_field(onnx_id, cleaned)
+                    field_validations[field_name] = {
+                        "is_valid": validation.is_valid,
+                        "error": validation.error_message,
+                        "warnings": validation.warnings,
+                    }
+                    
+                    if not validation.is_valid:
+                        warnings.append(
+                            f"Field '{field_name}' validation failed: {validation.error_message}"
+                        )
+                        conf *= 0.7  # Reduce confidence for invalid fields
+
                 # Boost NID confidence if format is valid
                 if field_name in ["nid", "front_nid", "back_nid", "id_number"] and cleaned:
                     if _is_valid_nid_format(cleaned):
                         conf = max(conf, 0.85)
+                        logger.debug(
+                            f"[Dual-{side}] NID format validation passed - "
+                            f"boosted confidence to {conf:.2f}"
+                        )
                     elif len(cleaned) >= 10:
                         conf = max(conf, 0.5)
-                
+
                 confidence_scores[field_name] = round(conf, 3)
-                
+
             except Exception as e:
                 logger.error(f"OCR failed for {side}.{field_name}: {e}")
                 extracted[field_name] = ""
                 confidence_scores[field_name] = 0.0
-        
+
         # Calculate overall confidence
         avg_conf = float(np.mean(list(confidence_scores.values()))) if confidence_scores else 0.0
         level = "high" if avg_conf > 0.85 else "medium" if avg_conf > 0.6 else "low"
-        
+
         return {
             "side": side,
             "extracted": extracted,
@@ -304,9 +375,12 @@ class DualSideProcessor:
                 "level": level,
                 "per_field": confidence_scores,
             },
+            "field_validations": field_validations,
+            "field_metadata": field_metadata,
             "processing_ms": int((time.time() - start_time) * 1000),
+            "warnings": warnings,
         }
-    
+
     def _preprocess_card(self, image: np.ndarray) -> np.ndarray:
         """Preprocess card image for field detection and OCR."""
         # Resize to standard width
