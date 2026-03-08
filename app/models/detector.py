@@ -401,11 +401,11 @@ class EgyptianIDDetector:
         Uses ONNX field detector if available (faster, more accurate),
         otherwise falls back to YOLO detector.
         """
-        # Try ONNX detector first
+        # Try ONNX detector first (lower threshold for better recall)
         if self.field_detector_onnx.session is not None:
             try:
                 start_time = time.time()
-                detections = self.field_detector_onnx.detect(card_image, conf_threshold=0.40)
+                detections = self.field_detector_onnx.detect(card_image, conf_threshold=0.30)
                 onnx_time = (time.time() - start_time) * 1000
                 logger.debug(f"ONNX field detection: {len(detections)} fields in {onnx_time:.1f}ms")
                 
