@@ -143,7 +143,7 @@ class ONNXFieldDetector:
         return batch, (sx, sy), (pad_w, pad_h)
     
     def _postprocess(self, output: np.ndarray, scale: Tuple[float, float], 
-                     padding: Tuple[int, int], conf_threshold: float = 0.45) -> List[Detection]:
+                     padding: Tuple[int, int], conf_threshold: float = 0.35) -> List[Detection]:
         """
         Post-process ONNX model output.
         
@@ -163,6 +163,11 @@ class ONNXFieldDetector:
         """
         # Transpose to [anchors, 21]
         output = np.transpose(output[0], (1, 0))  # [anchors, 21]
+        
+        # Log output statistics for debugging
+        max_objectness = float(np.max(output[:, 4]))
+        max_class_score = float(np.max(output[:, 5:21]))
+        logger.info(f"ONNX output stats: max_objectness={max_objectness:.3f}, max_class_score={max_class_score:.3f}")
         
         detections = []
         
@@ -223,18 +228,23 @@ class ONNXFieldDetector:
         """Apply Non-Maximum Suppression to remove duplicate detections."""
         if not detections:
             return []
+
+        # Log detections before NMS
+        logger.info(f"NMS input: {len(detections)} detections with confidences: {[d.confidence for d in detections]}")
         
         # Convert to format for NMS
         boxes = [d.bbox for d in detections]
         scores = [d.confidence for d in detections]
-        
-        # OpenCV NMS
-        indices = cv2.dnn.NMSBoxes(boxes, scores, score_threshold=0.45, nms_threshold=iou_threshold)
-        
+
+        # OpenCV NMS - lower score_threshold to keep more detections
+        indices = cv2.dnn.NMSBoxes(boxes, scores, score_threshold=0.25, nms_threshold=iou_threshold)
+
         if len(indices) > 0:
+            logger.info(f"NMS output: {len(indices)} detections")
             return [detections[i] for i in indices]
         else:
-            return detections
+            logger.warning(f"NMS filtered out all {len(detections)} detections - returning all")
+            return detections  # Return all if NMS filters everything
     
     def get_class_names(self) -> Dict[int, str]:
         """Get mapping of class IDs to field names."""
@@ -407,7 +417,8 @@ class EgyptianIDDetector:
                 start_time = time.time()
                 detections = self.field_detector_onnx.detect(card_image, conf_threshold=0.30)
                 onnx_time = (time.time() - start_time) * 1000
-                logger.debug(f"ONNX field detection: {len(detections)} fields in {onnx_time:.1f}ms")
+                detected_classes = [d.class_name for d in detections]
+                logger.info(f"ONNX field detection: {len(detections)} fields in {onnx_time:.1f}ms - {detected_classes}")
                 
                 if detections:
                     fields = {}

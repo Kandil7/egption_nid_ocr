@@ -176,14 +176,26 @@ class IDExtractionPipeline:
                 logger.debug(f"Cache HIT for {field_name}")
                 return field_name, cached["text"], cached["confidence"]
 
+            # Log field image properties for debugging NID issues
+            if field_name in ["nid", "front_nid", "back_nid", "id_number"]:
+                logger.info(f"NID field '{field_name}': shape={field_img.shape}, det_conf={det_conf:.2f}")
+
             # Preprocess for OCR
             processed = preprocess_text_field(field_img, field_type=field_name)
+
+            # Log NID preprocessing result
+            if field_name in ["nid", "front_nid", "back_nid", "id_number"]:
+                logger.info(f"NID preprocessed: shape={processed.shape}, dtype={processed.dtype}")
 
             # Run OCR
             if self._ocr:
                 ocr_result = self._ocr.ocr_field(processed, field_name)
                 text = ocr_result.text
                 ocr_conf = ocr_result.confidence
+                
+                # Log NID OCR result
+                if field_name in ["nid", "front_nid", "back_nid", "id_number"]:
+                    logger.info(f"NID OCR result: text='{text}' (len={len(text)}), conf={ocr_conf:.2f}, engine={ocr_result.engine_used}")
             else:
                 # Fallback: return empty
                 text = ""

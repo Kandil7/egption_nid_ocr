@@ -348,6 +348,9 @@ class TesseractEngine:
             else:
                 gray = image_np.copy()
 
+            # Log image properties for debugging
+            logger.info(f"Tesseract input: shape={gray.shape}, dtype={gray.dtype}, min={gray.min()}, max={gray.max()}")
+
             # Apply thresholding for better digit recognition
             _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
@@ -356,10 +359,10 @@ class TesseractEngine:
             if h < 100:
                 scale = 100 / h
                 thresh = cv2.resize(thresh, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+                logger.info(f"Tesseract upscaled: {h}x{w} → {thresh.shape[0]}x{thresh.shape[1]}")
 
             # Configure tesseract for digits only with single text line mode
             # --psm 7: Treat the image as a single text line
-            # --psm 6: Treat as a single uniform block of text
             custom_config = r"--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789"
 
             # Use ara_number_id.traineddata - specialized for Arabic numbers
@@ -383,7 +386,7 @@ class TesseractEngine:
                         conf = float(data['conf'][i])
                         confidence = max(confidence, conf)
                 
-                logger.debug(f"Tesseract ara_number_id result: '{text}' (conf: {confidence:.1f}%)")
+                logger.info(f"Tesseract ara_number_id result: '{text}' (conf: {confidence:.1f}%, latency: {int((time.time() - t0) * 1000)}ms)")
                 
             except Exception as e:
                 logger.warning(f"ara_number_id failed: {e}, falling back to eng")
@@ -410,7 +413,7 @@ class TesseractEngine:
             translation_table = str.maketrans(arabic_indic, european)
             cleaned_text = cleaned_text.translate(translation_table)
 
-            logger.debug(f"Tesseract digit OCR - raw: '{text}', cleaned: '{cleaned_text}'")
+            logger.info(f"Tesseract digit OCR - raw: '{text}', cleaned: '{cleaned_text}' (len={len(cleaned_text)})")
 
             # Calculate confidence based on text length (NID should be 14 digits)
             # and Tesseract's confidence score

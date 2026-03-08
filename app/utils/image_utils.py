@@ -389,7 +389,7 @@ def _preprocess_nid_field(gray: np.ndarray, h: int, w: int) -> np.ndarray:
 
     Optimized for Egyptian NID format (14 digits) with:
     - Aggressive upscaling for small digits
-    - Contrast enhancement
+    - Contrast enhancement for low-contrast images
     - Adaptive thresholding for Tesseract
     - Morphological operations to connect broken digit segments
 
@@ -414,10 +414,23 @@ def _preprocess_nid_field(gray: np.ndarray, h: int, w: int) -> np.ndarray:
         gray = cv2.resize(gray, (int(w * scale), target_height), interpolation=cv2.INTER_CUBIC)
         h, w = target_height, int(w * scale)
 
-    # Step 2: Contrast enhancement
-    # Apply CLAHE for better digit separation
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    enhanced = clahe.apply(gray)
+    # Step 2: Check contrast and enhance if needed
+    # Calculate standard deviation (measure of contrast)
+    contrast = np.std(gray)
+    logger.info(f"NID preprocessing: contrast={contrast:.1f} (low if <30)")
+    
+    if contrast < 30:
+        # Low contrast - apply aggressive enhancement
+        logger.info("NID: Applying aggressive contrast enhancement")
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(16, 16))
+        enhanced = clahe.apply(gray)
+        
+        # Additional contrast boost
+        enhanced = cv2.convertScaleAbs(enhanced, alpha=1.3, beta=0)
+    else:
+        # Good contrast - mild enhancement
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        enhanced = clahe.apply(gray)
 
     # Return enhanced grayscale (single channel)
     # EasyOCR and PaddleOCR both accept grayscale images
