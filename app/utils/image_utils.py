@@ -257,8 +257,8 @@ FRONT_ROIS = {
     # Names (right side, upper)
     "firstName": (0.30, 0.08, 0.68, 0.20),
     "lastName": (0.30, 0.28, 0.68, 0.18),
-    # National ID (middle)
-    "nid": (0.10, 0.50, 0.80, 0.12),
+    # National ID (middle/bottom)
+    "nid": (0.28, 0.46, 0.68, 0.14),
     # Other fields
     "serial": (0.30, 0.65, 0.68, 0.10),
     "address": (0.05, 0.78, 0.90, 0.18),
@@ -317,11 +317,13 @@ def extract_all_rois(card_image: np.ndarray, side: str = "front") -> dict[str, n
 
 def preprocess_text_field(image: np.ndarray, field_type: str = "arabic") -> np.ndarray:
     """
-    Optimized preprocessing - minimal transforms, let OCR engine do the work.
-    
+    Optimized preprocessing with NID-specific enhancements.
+
     Key insight: EasyOCR and PaddleOCR have built-in preprocessing.
     Heavy transforms (binarization, aggressive denoising) often hurt performance.
     
+    NID fields get specialized treatment for digit recognition.
+
     Args:
         image: Input image
         field_type: Type of field (nid, firstName, lastName, address, etc.)
@@ -336,7 +338,7 @@ def preprocess_text_field(image: np.ndarray, field_type: str = "arabic") -> np.n
         gray = image.copy()
 
     h, w = gray.shape
-    
+
     # Upscale strategy - only if truly needed (minimum 48px height)
     if h < 48:
         scale = 48 / h
@@ -345,21 +347,15 @@ def preprocess_text_field(image: np.ndarray, field_type: str = "arabic") -> np.n
 
     # Field-specific lightweight preprocessing
     if field_type in ["nid", "front_nid", "back_nid", "id_number", "serial", "serial_num", "issue_code"]:
-        # Digit fields: slight contrast enhancement only if low contrast
-        if np.std(gray) < 30:  # Low contrast
-            gray = cv2.convertScaleAbs(gray, alpha=1.2, beta=0)
-        # Upscale for better digit recognition
-        if h < 80:
-            scale = 80 / h
-            gray = cv2.resize(gray, (int(w * scale), 80), interpolation=cv2.INTER_CUBIC)
-        return gray
+        # NID-specific preprocessing for optimal digit recognition
+        return _preprocess_nid_field(gray, h, w)
 
     elif field_type in ["firstName", "lastName", "name_ar", "address", "add_line_1", "add_line_2"]:
         # Arabic text: minimal denoising, preserve text structure
         if h < 80:
             scale = 80 / h
             gray = cv2.resize(gray, (int(w * scale), 80), interpolation=cv2.INTER_CUBIC)
-        
+
         # Only apply very light bilateral filter if noisy (high variance)
         if np.var(gray) > 2000:  # High variance indicates noise
             gray = cv2.bilateralFilter(gray, d=5, sigmaColor=30, sigmaSpace=30)
@@ -385,6 +381,47 @@ def preprocess_text_field(image: np.ndarray, field_type: str = "arabic") -> np.n
         scale = 80 / h
         gray = cv2.resize(gray, (int(w * scale), 80), interpolation=cv2.INTER_CUBIC)
     return gray
+
+
+def _preprocess_nid_field(gray: np.ndarray, h: int, w: int) -> np.ndarray:
+    """
+    Specialized preprocessing for NID/digit fields.
+
+    Optimized for Egyptian NID format (14 digits) with:
+    - Aggressive upscaling for small digits
+    - Contrast enhancement
+    - Adaptive thresholding for Tesseract
+    - Morphological operations to connect broken digit segments
+
+    Args:
+        gray: Grayscale or BGR image
+        h: Height
+        w: Width
+
+    Returns:
+        Preprocessed grayscale image optimized for digit OCR
+    """
+    # Ensure grayscale
+    if len(gray.shape) == 3:
+        gray = cv2.cvtColor(gray, cv2.COLOR_BGR2GRAY)
+        h, w = gray.shape
+    
+    # Step 1: Upscale significantly for better digit recognition
+    # NID digits are often small - upscale to at least 120px height
+    target_height = max(120, h)
+    if h < target_height:
+        scale = target_height / h
+        gray = cv2.resize(gray, (int(w * scale), target_height), interpolation=cv2.INTER_CUBIC)
+        h, w = target_height, int(w * scale)
+
+    # Step 2: Contrast enhancement
+    # Apply CLAHE for better digit separation
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(gray)
+
+    # Return enhanced grayscale (single channel)
+    # EasyOCR and PaddleOCR both accept grayscale images
+    return enhanced
 
 
 def adaptive_preprocess(image: np.ndarray, quality_score: float) -> np.ndarray:

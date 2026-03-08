@@ -21,6 +21,98 @@ def _normalize_digits(text: str) -> str:
     return text.translate(ARABIC_INDIC_TO_EUROPEAN)
 
 
+def _validate_and_correct_nid(text: str) -> str:
+    """
+    Validate and correct Egyptian NID (14 digits).
+    
+    Applies rules:
+    1. Must be exactly 14 digits
+    2. First digit must be 2 or 3 (century code)
+    3. Digits 4-5 must be valid month (01-12)
+    4. Digits 6-7 must be valid day (01-31)
+    5. Checksum validation (last digit)
+    
+    Attempts correction if validation fails.
+    
+    Args:
+        text: Raw digit string
+        
+    Returns:
+        Corrected 14-digit NID or best effort
+    """
+    if not text:
+        return text
+    
+    # Check if we can recover a 13-digit NID
+    if len(text) == 13:
+        try:
+            from app.models.id_parser import calculate_nid_checksum
+            # Pad with 0 as a dummy checksum to calculate the real one
+            temp_nid = text + "0"
+            expected_checksum = calculate_nid_checksum(temp_nid)
+            if expected_checksum != -1:
+                text = text + str(expected_checksum)
+        except ImportError:
+            pass
+
+    # If we have exactly 14 digits, apply corrections
+    if len(text) == 14:
+        # Validate century code (digit 1)
+        if text[0] not in '23':
+            # Try to infer from context (age)
+            # For now, default to 2 (1900s) as most common
+            text = '2' + text[1:]
+        
+        # Validate month (digits 3-4, 0-indexed: 2-3)
+        month = text[2:4]
+        if not ('01' <= month <= '12'):
+            # Common OCR mistakes: 0O, 1I, 6G
+            month = month.replace('O', '0').replace('I', '1').replace('l', '1')
+            if '01' <= month <= '12':
+                text = text[:2] + month + text[4:]
+        
+        # Validate day (digits 5-6, 0-indexed: 4-5)
+        day = text[4:6]
+        if not ('01' <= day <= '31'):
+            day = day.replace('O', '0').replace('I', '1').replace('l', '1')
+            if '01' <= day <= '31':
+                text = text[:4] + day + text[6:]
+
+        # Attempt checksum-guided correction
+        try:
+            from app.models.id_parser import calculate_nid_checksum, validate_nid_checksum
+            if not validate_nid_checksum(text):
+                # Try swapping commonly confused digits
+                confusable_pairs = [
+                    ('0', '8'), ('8', '0'),
+                    ('1', '7'), ('7', '1'),
+                    ('3', '8'), ('8', '3'),
+                    ('5', '6'), ('6', '5'),
+                    ('2', '7'), ('7', '2'),
+                    ('0', '5'), ('5', '0')
+                ]
+                found_correction = False
+                for i, char in enumerate(text[:-1]): # Don't swap the checksum digit itself
+                    if found_correction:
+                        break
+                    for from_char, to_char in confusable_pairs:
+                        if char == from_char:
+                            candidate = text[:i] + to_char + text[i+1:]
+                            if validate_nid_checksum(candidate):
+                                text = candidate
+                                found_correction = True
+                                break
+        except ImportError:
+            pass
+    
+    # If length is wrong, try to fix
+    elif len(text) > 14:
+        # Take first 14 digits (most likely correct)
+        text = text[:14]
+    
+    return text
+
+
 def _is_arabic_char(char: str) -> bool:
     """Check if character is Arabic."""
     code = ord(char)
@@ -177,6 +269,10 @@ def clean_field(text: str, field_type: str) -> str:
             text = text.replace(wrong, right)
         # Keep only digits
         text = re.sub(r"\D", "", text)
+        
+        # NID-specific validation and correction
+        if field_type in ["nid", "front_nid", "back_nid", "id_number"]:
+            text = _validate_and_correct_nid(text)
 
     # Arabic text fields - keep both Arabic AND English (names can be in either)
     elif field_type in ["firstName", "lastName", "name_ar", "address", "add_line_1", "add_line_2", "nationality"]:

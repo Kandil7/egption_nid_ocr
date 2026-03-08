@@ -464,8 +464,8 @@ class TestPreprocessing:
 
         # Should be grayscale
         assert len(result.shape) == 2
-        # Should be upscaled
-        assert result.shape[0] >= 80
+        # NID fields are upscaled to at least 120px for better digit recognition
+        assert result.shape[0] >= 120
 
     def test_preprocess_arabic_field(self):
         """Test preprocessing for Arabic text fields."""

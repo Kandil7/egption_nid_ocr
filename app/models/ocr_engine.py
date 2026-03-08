@@ -484,6 +484,26 @@ class OCREngine:
         self._initialized = True
         logger.info("OCR Engine ready")
 
+    def _vote_nid_results(self, results: list[str]) -> str:
+        """Vote character-by-character on multiple 14-digit NID candidates."""
+        if not results:
+            return ""
+        if len(results) == 1:
+            return results[0]
+
+        # Ensure all strings are 14 digits by padding or truncating if necessary
+        # Usually they are already filtered to 14, but just in case
+        padded_results = [r[:14].ljust(14, '0') for r in results]
+        
+        voted = []
+        for i in range(14):
+            chars_at_i = [r[i] for r in padded_results]
+            # Get most common character
+            most_common = max(set(chars_at_i), key=chars_at_i.count)
+            voted.append(most_common)
+            
+        return "".join(voted)
+
     def ocr_field(self, image: np.ndarray, field_name: str) -> OCRResult:
         """
         Run OCR on a field with optimized engine routing.
@@ -506,31 +526,79 @@ class OCREngine:
         # Arabic text fields
         arabic_fields = {"firstName", "lastName", "name_ar", "address", "add_line_1", "add_line_2", "nationality"}
 
-        # NID fields - prioritize Tesseract with ara_number_id
+        # NID fields - prioritize ensemble voting
         if field_name in nid_fields:
-            logger.debug(f"OCR field '{field_name}' - NID field, using ara_number_id first")
+            logger.debug(f"OCR field '{field_name}' - NID field, using ensemble voting")
+            t0 = time.time()
+            candidates = []
+            best_confidence = 0.0
             
-            # 1. Tesseract with ara_number_id.traineddata (BEST for NID)
+            # 1. Tesseract with ara_number_id.traineddata
             if self._tesseract and self._tesseract._client is not None:
                 tesseract_result = self._tesseract.run_digits(image)
                 if tesseract_result.text and len(tesseract_result.text) >= 10:
-                    logger.debug(f"Tesseract ara_number_id result: '{tesseract_result.text}' (conf: {tesseract_result.confidence:.2f})")
-                    return tesseract_result
-                logger.debug(f"Tesseract returned '{tesseract_result.text}', trying Paddle...")
+                    candidates.append(("tesseract", tesseract_result.text, tesseract_result.confidence))
+                    best_confidence = max(best_confidence, tesseract_result.confidence)
             
             # 2. Paddle digit recognizer
             if self._paddle and self._paddle._digit_reader is not None:
                 paddle_result = self._paddle.run_digits(image)
-                if paddle_result.text and len(paddle_result.text) > 0:
-                    logger.debug(f"PaddleOCR digits result: '{paddle_result.text}'")
-                    return paddle_result
+                if paddle_result.text and len(paddle_result.text) >= 10:
+                    # Clean and normalize paddle result just in case
+                    p_text = re.sub(r'\D', '', paddle_result.text)
+                    if len(p_text) >= 10:
+                        candidates.append(("paddle", p_text, paddle_result.confidence))
+                        best_confidence = max(best_confidence, paddle_result.confidence)
             
             # 3. EasyOCR with numeric allowlist
             if self._easy:
+                # We can try multi-scale for EasyOCR
                 easy_result = self._easy.run(image, digits_only=True)
-                return easy_result
+                if easy_result.text and len(easy_result.text) >= 10:
+                    e_text = re.sub(r'\D', '', easy_result.text)
+                    if len(e_text) >= 10:
+                        candidates.append(("easyocr", e_text, easy_result.confidence))
+                        best_confidence = max(best_confidence, easy_result.confidence)
+
+            # Analyze candidates
+            if not candidates:
+                return OCRResult(text="", confidence=0.0, engine_used=OCRMode.TESSERACT, latency_ms=int((time.time() - t0) * 1000))
+
+            results_14 = [c[1] for c in candidates if len(c[1]) == 14]
             
-            return OCRResult(text="", confidence=0.0, engine_used=OCRMode.EASYOCR, latency_ms=0)
+            if len(results_14) >= 2:
+                # We have multiple 14-digit results, perform ensemble voting
+                voted_text = self._vote_nid_results(results_14)
+                logger.info(f"NID ensemble: {results_14} → voted: '{voted_text}'")
+                
+                # Check if voted text passes checksum
+                from app.models.id_parser import validate_nid_checksum
+                if validate_nid_checksum(voted_text):
+                    best_confidence = min(0.99, best_confidence + 0.1) # Boost for valid checksum
+                
+                return OCRResult(
+                    text=voted_text,
+                    confidence=best_confidence,
+                    engine_used=OCRMode.TESSERACT,
+                    latency_ms=int((time.time() - t0) * 1000),
+                )
+            elif len(results_14) == 1:
+                # Only one 14-digit result
+                return OCRResult(
+                    text=results_14[0],
+                    confidence=best_confidence,
+                    engine_used=OCRMode.TESSERACT,
+                    latency_ms=int((time.time() - t0) * 1000),
+                )
+            else:
+                # No 14-digit results, pick the longest/best candidate
+                best_candidate = max(candidates, key=lambda x: (len(x[1]), x[2]))
+                return OCRResult(
+                    text=best_candidate[1],
+                    confidence=best_candidate[2],
+                    engine_used=OCRMode.TESSERACT, # Proxy for ensemble
+                    latency_ms=int((time.time() - t0) * 1000),
+                )
 
         # Other digit-only fields
         if field_name in digit_fields:

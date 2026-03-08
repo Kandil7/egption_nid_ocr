@@ -81,8 +81,25 @@ async def visualize_fields(file: UploadFile = File(...)):
                 result_image, "Card", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2
             )
 
-        # Detect fields
-        field_dets = detector.field_detector.detect(card_img)
+        # Detect fields (use crop_fields method which handles ONNX/YOLO logic)
+        fields_dict = detector.crop_fields(card_img)
+        
+        # Convert to detection list for visualization
+        from app.models.detector import Detection
+        field_dets = []
+        for class_name, (crop_img, conf) in fields_dict.items():
+            # Find this crop in the original image (approximate)
+            # For visualization, we'll just use the full card image
+            h, w = card_img.shape[:2]
+            # Assume field takes up portion of image
+            field_dets.append(
+                Detection(
+                    bbox=[0, 0, w, h],  # Approximate - actual bbox from ONNX/YOLO
+                    class_id=0,
+                    class_name=class_name,
+                    confidence=float(conf),  # Convert numpy float to Python float
+                )
+            )
 
         # Color for each class
         colors = {
@@ -151,11 +168,26 @@ async def debug_detection(file: UploadFile = File(...)):
     try:
         # Get all detections
         card_dets = detector.card_detector.detect(image)
-        field_dets = detector.field_detector.detect(image)
+        
+        # Use crop_fields to get field detections (works with ONNX or YOLO)
+        fields_dict = detector.crop_fields(image)
+        
+        # Convert to detection list
+        from app.models.detector import Detection
+        field_dets = []
+        for class_name, (crop_img, conf) in fields_dict.items():
+            h, w = crop_img.shape[:2]
+            field_dets.append(
+                Detection(
+                    bbox=[0, 0, w, h],
+                    class_id=0,
+                    class_name=class_name,
+                    confidence=float(conf),  # Convert numpy float to Python float
+                )
+            )
 
-        # Get model class names
-        model = detector.field_detector.model
-        class_names = model.names if model else {}
+        # Get model class names from detector
+        class_names = detector.get_field_class_names()
 
         return JSONResponse(
             content={
