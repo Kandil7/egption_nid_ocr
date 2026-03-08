@@ -5,6 +5,7 @@ Cleans and normalizes OCR output based on field type.
 
 import re
 import unicodedata
+from typing import List
 
 
 # Arabic Unicode ranges for text cleaning
@@ -20,25 +21,125 @@ def _normalize_digits(text: str) -> str:
     return text.translate(ARABIC_INDIC_TO_EUROPEAN)
 
 
+def _is_arabic_char(char: str) -> bool:
+    """Check if character is Arabic."""
+    code = ord(char)
+    return (0x0600 <= code <= 0x06FF or 
+            0x0750 <= code <= 0x077F or
+            0x08A0 <= code <= 0x08FF or
+            0xFB50 <= code <= 0xFDFF or
+            0xFE70 <= code <= 0xFEFF)
+
+
 def _reorder_arabic_tokens(text: str) -> str:
     """
-    Reverse entire Arabic text string to correct character order.
-
-    OCR engines scan left-to-right, but Arabic is written right-to-left.
-    This reverses the entire string to restore correct character order.
-
-    Example:
-        OCR returns: "رحمه" (characters reversed)
-        Output: "همحر" → displayed correctly as "رحمه"
+    Reorder Arabic text at BOTH character and word level.
     
-    Note: We reverse the full string including spaces because OCR captures
-    the entire line in reverse order.
+    OCR engines scan left-to-right, but Arabic is written right-to-left.
+    This causes TWO issues:
+    1. Characters within each word appear reversed
+    2. Word order appears reversed
+    
+    This function fixes BOTH:
+    1. Reverses characters within each Arabic word
+    2. Reverses the order of Arabic word sequences
+    
+    Example:
+        OCR returns: "دمحم يوادعس" (characters reversed, words in wrong order)
+        Step 1 (char reversal): "محمد سعداوي" 
+        Step 2 (word reversal): "سعداوي محمد"
+        Output: "سعداوي محمد" (correct)
+        
+        Complex: "دمحم يوادعس عيفشلا دبع رصان"
+        → "محمد سعداوي الشفيع عبد ناصر"
+        → "ناصر عبد الشفيع سعداوي محمد"
     """
     if not text:
         return text
+    
+    # Split into words
+    words = text.split(' ')
+    
+    if len(words) <= 1:
+        # Single word - just reverse characters if Arabic
+        if words and words[0]:
+            word = words[0]
+            if any(_is_arabic_char(c) for c in word):
+                return word[::-1]  # Reverse characters
+        return text
+    
+    # Step 1: Reverse characters within each Arabic word
+    corrected_words = []
+    for word in words:
+        if not word:
+            corrected_words.append(word)
+            continue
+            
+        if any(_is_arabic_char(c) for c in word):
+            # Reverse characters in Arabic words
+            corrected_words.append(word[::-1])
+        else:
+            # Keep non-Arabic words as-is
+            corrected_words.append(word)
+    
+    # Step 2: Reverse order of contiguous Arabic word sequences
+    result = []
+    arabic_sequence = []
+    
+    for word in corrected_words:
+        if not word:
+            continue
+            
+        # Check if word is primarily Arabic
+        is_arabic = all(_is_arabic_char(c) or c.isspace() for c in word if c.isalpha())
+        
+        if is_arabic:
+            arabic_sequence.append(word)
+        else:
+            # Flush Arabic sequence (reversed order)
+            if arabic_sequence:
+                result.extend(reversed(arabic_sequence))
+                arabic_sequence = []
+            result.append(word)
+    
+    # Flush any remaining Arabic sequence
+    if arabic_sequence:
+        result.extend(reversed(arabic_sequence))
+    
+    return ' '.join(result)
 
-    # Reverse the entire text to correct Arabic character order
-    return text[::-1]
+
+def normalize_arabic_text(text: str) -> str:
+    """
+    Normalize Arabic text for consistent representation.
+    
+    - Normalize alef forms (أ, إ, آ → ا)
+    - Normalize ha forms (ة → ه)
+    - Normalize yeh forms (ى → ي)
+    - Remove tatweel (ـ)
+    
+    This improves matching and consistency across OCR results.
+    """
+    if not text:
+        return text
+    
+    # Unicode normalization
+    text = unicodedata.normalize("NFKC", text)
+    
+    # Character normalizations for consistency
+    normalizations = [
+        ('أ', 'ا'), ('إ', 'ا'), ('آ', 'ا'),  # Alef forms
+        ('ة', 'ه'),  # Ta marbuta
+        ('ى', 'ي'),  # Alif maqsura
+        ('ـ', ''),   # Tatweel
+        ('ؤ', 'ء'),  # Waw with hamza
+        ('ئ', 'ء'),  # Yeh with hamza
+    ]
+    
+    for old, new in normalizations:
+        text = text.replace(old, new)
+    
+    return text
 
 
 def clean_field(text: str, field_type: str) -> str:
@@ -80,13 +181,15 @@ def clean_field(text: str, field_type: str) -> str:
     # Arabic text fields - keep both Arabic AND English (names can be in either)
     elif field_type in ["firstName", "lastName", "name_ar", "address", "add_line_1", "add_line_2", "nationality"]:
         # Keep Arabic, English letters, and spaces
-        # Arabic: \u0600-\u06ff\u0750-\u077f\u08a0-\u08ff\ufb50-\ufdff\ufe70-\ufeff
-        # English: A-Za-z
-        pattern = f"[^\u0600-\u06ff\u0750-\u077f\u08a0-\u08ff\ufb50-\ufdff\ufe70-\ufeffa-zA-Z\\s]"
+        pattern = f"[^{ARABIC_CHARS}a-zA-Z\\s]"
         text = re.sub(pattern, "", text)
         text = re.sub(r"\s+", " ", text).strip()
-        # Apply heuristic reordering for Arabic-only tokens
+        
+        # Apply proper Arabic reordering (character-level within words)
         text = _reorder_arabic_tokens(text)
+        
+        # Apply Arabic normalization for consistency
+        text = normalize_arabic_text(text)
 
     # English text
     elif field_type in ["serial", "job_title"]:

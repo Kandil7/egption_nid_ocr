@@ -324,7 +324,12 @@ class TesseractEngine:
         return "tesseract"
 
     def run_digits(self, image_np: np.ndarray) -> OCRResult:
-        """Run digit recognition on a cropped field image."""
+        """
+        Run digit recognition on a cropped field image.
+        
+        Optimized for Egyptian NID using ara_number_id.traineddata
+        which specializes in Arabic-Indic and European digit recognition.
+        """
         t0 = time.time()
 
         if self._client is None:
@@ -346,27 +351,78 @@ class TesseractEngine:
             # Apply thresholding for better digit recognition
             _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
-            # Configure tesseract for digits only
-            custom_config = r"--oem 3 --psm 6 -c tessedit_char_whitelist=0123456789"
+            # Upscale for better recognition (NID digits are often small)
+            h, w = thresh.shape
+            if h < 100:
+                scale = 100 / h
+                thresh = cv2.resize(thresh, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+
+            # Configure tesseract for digits only with single text line mode
+            # --psm 7: Treat the image as a single text line
+            # --psm 6: Treat as a single uniform block of text
+            custom_config = r"--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789"
+
+            # Use ara_number_id.traineddata - specialized for Arabic numbers
+            # This trained data recognizes both Arabic-Indic (٠١٢٣) and European (0123) digits
+            text = ""
+            confidence = 0.0
             
-            # Try with Arabic number trained data if available
             try:
-                text = self._client.image_to_string(thresh, config=custom_config, lang='ara_number_id')
-            except:
+                # Get detailed OCR result with confidence
+                data = self._client.image_to_data(
+                    thresh, 
+                    config=custom_config, 
+                    lang='ara_number_id',
+                    output_type=self._client.Output.DICT
+                )
+                
+                # Extract text and confidence from results
+                for i, box_text in enumerate(data['text']):
+                    if box_text.strip():
+                        text += box_text
+                        conf = float(data['conf'][i])
+                        confidence = max(confidence, conf)
+                
+                logger.debug(f"Tesseract ara_number_id result: '{text}' (conf: {confidence:.1f}%)")
+                
+            except Exception as e:
+                logger.warning(f"ara_number_id failed: {e}, falling back to eng")
                 # Fallback to English digits
-                text = self._client.image_to_string(thresh, config=custom_config, lang='eng')
-            
+                data = self._client.image_to_data(
+                    thresh, 
+                    config=custom_config, 
+                    lang='eng',
+                    output_type=self._client.Output.DICT
+                )
+                
+                for i, box_text in enumerate(data['text']):
+                    if box_text.strip():
+                        text += box_text
+                        conf = float(data['conf'][i])
+                        confidence = max(confidence, conf)
+
             # Clean text - keep only digits
             cleaned_text = re.sub(r'\D', '', text.strip())
             
+            # Normalize Arabic-Indic digits to European
+            arabic_indic = "٠١٢٣٤٥٦٧٨٩"
+            european = "0123456789"
+            translation_table = str.maketrans(arabic_indic, european)
+            cleaned_text = cleaned_text.translate(translation_table)
+
             logger.debug(f"Tesseract digit OCR - raw: '{text}', cleaned: '{cleaned_text}'")
-            
+
             # Calculate confidence based on text length (NID should be 14 digits)
-            confidence = min(1.0, len(cleaned_text) / 14.0) if cleaned_text else 0.0
+            # and Tesseract's confidence score
+            length_score = min(1.0, len(cleaned_text) / 14.0) if cleaned_text else 0.0
+            tesseract_conf = confidence / 100.0 if confidence > 0 else 0.0
+            
+            # Combined confidence: weight Tesseract's confidence higher
+            final_confidence = (tesseract_conf * 0.7 + length_score * 0.3) if cleaned_text else 0.0
 
             return OCRResult(
                 text=cleaned_text,
-                confidence=confidence,
+                confidence=final_confidence,
                 engine_used=OCRMode.TESSERACT,
                 latency_ms=int((time.time() - t0) * 1000),
             )
@@ -430,48 +486,72 @@ class OCREngine:
 
     def ocr_field(self, image: np.ndarray, field_name: str) -> OCRResult:
         """
-        Run OCR on a field.
-
+        Run OCR on a field with optimized engine routing.
+        
         Strategy:
-          - Digit-only fields (NID, serial, codes): Prefer Paddle digits → Tesseract → EasyOCR
-          - Arabic-rich text fields (names, addresses): Prefer PaddleOCR Arabic; fall back to EasyOCR.
-          - Other fields: EasyOCR default.
+          - NID fields: Tesseract (ara_number_id) → Paddle digits → EasyOCR
+          - Other digit fields: Paddle digits → Tesseract → EasyOCR
+          - Arabic text fields: PaddleOCR Arabic → EasyOCR
+          - Other fields: EasyOCR default
+          
+        Note: ara_number_id.traineddata is specifically trained for Arabic number
+        recognition and provides superior accuracy for Egyptian NID digits.
         """
-        digit_fields = {"nid", "front_nid", "back_nid", "id_number", "serial", "serial_num", "issue_code"}
+        # NID-specific fields (14-digit national ID)
+        nid_fields = {"nid", "front_nid", "back_nid", "id_number"}
+        
+        # Other digit fields (serial, codes, etc.)
+        digit_fields = {"serial", "serial_num", "issue_code"}
+        
+        # Arabic text fields
         arabic_fields = {"firstName", "lastName", "name_ar", "address", "add_line_1", "add_line_2", "nationality"}
 
-        # Digit-only fields
-        if field_name in digit_fields:
-            logger.debug(f"OCR field '{field_name}' - digit field, checking engines...")
+        # NID fields - prioritize Tesseract with ara_number_id
+        if field_name in nid_fields:
+            logger.debug(f"OCR field '{field_name}' - NID field, using ara_number_id first")
             
-            # 1. Prefer Paddle digit recognizer (PP-OCRv4 mobile_rec or custom) if available
+            # 1. Tesseract with ara_number_id.traineddata (BEST for NID)
+            if self._tesseract and self._tesseract._client is not None:
+                tesseract_result = self._tesseract.run_digits(image)
+                if tesseract_result.text and len(tesseract_result.text) >= 10:
+                    logger.debug(f"Tesseract ara_number_id result: '{tesseract_result.text}' (conf: {tesseract_result.confidence:.2f})")
+                    return tesseract_result
+                logger.debug(f"Tesseract returned '{tesseract_result.text}', trying Paddle...")
+            
+            # 2. Paddle digit recognizer
             if self._paddle and self._paddle._digit_reader is not None:
-                logger.debug("Using PaddleOCR digits")
                 paddle_result = self._paddle.run_digits(image)
-                # Only use Paddle result if it returns actual digits
                 if paddle_result.text and len(paddle_result.text) > 0:
                     logger.debug(f"PaddleOCR digits result: '{paddle_result.text}'")
                     return paddle_result
-                logger.debug("PaddleOCR digits returned empty, trying Tesseract...")
             
-            # 2. Try Tesseract with Arabic number trained data
-            if self._tesseract and self._tesseract._client is not None:
-                logger.debug("Using Tesseract digits")
-                tesseract_result = self._tesseract.run_digits(image)
-                if tesseract_result.text:
-                    logger.debug(f"Tesseract digits result: '{tesseract_result.text}'")
-                    return tesseract_result
-                logger.debug("Tesseract digits returned empty, trying EasyOCR...")
-            
-            # 3. Fallback to EasyOCR with numeric allowlist
+            # 3. EasyOCR with numeric allowlist
             if self._easy:
-                logger.debug("Using EasyOCR digits")
                 easy_result = self._easy.run(image, digits_only=True)
-                if easy_result.text:
-                    logger.debug(f"EasyOCR digits result: '{easy_result.text}'")
                 return easy_result
             
-            logger.warning(f"No digit OCR engine available for field '{field_name}'")
+            return OCRResult(text="", confidence=0.0, engine_used=OCRMode.EASYOCR, latency_ms=0)
+
+        # Other digit-only fields
+        if field_name in digit_fields:
+            logger.debug(f"OCR field '{field_name}' - digit field")
+            
+            # 1. Paddle digit recognizer
+            if self._paddle and self._paddle._digit_reader is not None:
+                paddle_result = self._paddle.run_digits(image)
+                if paddle_result.text and len(paddle_result.text) > 0:
+                    return paddle_result
+            
+            # 2. Tesseract with ara_number_id
+            if self._tesseract and self._tesseract._client is not None:
+                tesseract_result = self._tesseract.run_digits(image)
+                if tesseract_result.text:
+                    return tesseract_result
+            
+            # 3. EasyOCR fallback
+            if self._easy:
+                return self._easy.run(image, digits_only=True)
+            
             return OCRResult(text="", confidence=0.0, engine_used=OCRMode.EASYOCR, latency_ms=0)
 
         # Arabic / mixed-name/address fields → PaddleOCR Arabic first

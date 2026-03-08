@@ -73,6 +73,57 @@ class ParsedNationalID:
     sequence: Optional[str] = None
     raw: Optional[str] = None
     error: Optional[str] = None
+    checksum_valid: bool = False  # Checksum validation result
+
+
+def calculate_nid_checksum(nid: str) -> int:
+    """
+    Calculate Egyptian NID checksum digit using Luhn-like algorithm.
+    
+    The checksum algorithm (based on Egyptian Civil ID standard):
+    - Sum of odd-position digits * 1
+    - Sum of even-position digits * 2 (with digit sum for values > 9)
+    - Checksum = (10 - (total % 10)) % 10
+    
+    Args:
+        nid: 14-digit national ID string
+        
+    Returns:
+        Expected checksum digit (0-9), or -1 if invalid input
+    """
+    if len(nid) != 14:
+        return -1
+    
+    total = 0
+    for i, digit in enumerate(nid[:13]):  # First 13 digits
+        d = int(digit)
+        if (i + 1) % 2 == 1:  # Odd position (1-indexed)
+            total += d
+        else:  # Even position
+            doubled = d * 2
+            # Sum digits if doubled value > 9
+            total += doubled if doubled < 10 else (doubled // 10 + doubled % 10)
+    
+    checksum = (10 - (total % 10)) % 10
+    return checksum
+
+
+def validate_nid_checksum(nid: str) -> bool:
+    """
+    Validate NID checksum digit.
+    
+    Args:
+        nid: 14-digit national ID string
+        
+    Returns:
+        True if checksum is valid, False otherwise
+    """
+    if len(nid) != 14 or not nid.isdigit():
+        return False
+    
+    expected = calculate_nid_checksum(nid)
+    actual = int(nid[13])
+    return expected == actual
 
 
 def parse_national_id(raw_id: str) -> ParsedNationalID:
@@ -105,9 +156,15 @@ def parse_national_id(raw_id: str) -> ParsedNationalID:
     if len(national_id) != 14:
         return ParsedNationalID(
             valid=False,
+            checksum_valid=False,
             error=f"Invalid length: expected 14 digits, got {len(national_id)}",
             raw=national_id,
         )
+
+    # Validate checksum
+    checksum_valid = validate_nid_checksum(national_id)
+    if not checksum_valid:
+        logger.warning(f"NID checksum validation failed: {national_id}")
 
     try:
         # Extract components
@@ -122,6 +179,7 @@ def parse_national_id(raw_id: str) -> ParsedNationalID:
         if century_code not in [2, 3]:
             return ParsedNationalID(
                 valid=False,
+                checksum_valid=checksum_valid,
                 error="Invalid century code (must be 2 or 3)",
                 raw=national_id,
             )
@@ -133,12 +191,18 @@ def parse_national_id(raw_id: str) -> ParsedNationalID:
         # Validate month and day
         if not (1 <= month <= 12):
             return ParsedNationalID(
-                valid=False, error=f"Invalid month: {month}", raw=national_id
+                valid=False,
+                checksum_valid=checksum_valid,
+                error=f"Invalid month: {month}",
+                raw=national_id,
             )
 
         if not (1 <= day <= 31):
             return ParsedNationalID(
-                valid=False, error=f"Invalid day: {day}", raw=national_id
+                valid=False,
+                checksum_valid=checksum_valid,
+                error=f"Invalid day: {day}",
+                raw=national_id,
             )
 
         # Determine gender
@@ -161,6 +225,7 @@ def parse_national_id(raw_id: str) -> ParsedNationalID:
 
         return ParsedNationalID(
             valid=True,
+            checksum_valid=checksum_valid,
             birth_date=birth_date,
             governorate=governorate,
             gender=gender,
@@ -171,7 +236,10 @@ def parse_national_id(raw_id: str) -> ParsedNationalID:
 
     except (ValueError, IndexError) as e:
         return ParsedNationalID(
-            valid=False, error=f"Parse error: {str(e)}", raw=national_id
+            valid=False,
+            checksum_valid=checksum_valid,
+            error=f"Parse error: {str(e)}",
+            raw=national_id,
         )
 
 
