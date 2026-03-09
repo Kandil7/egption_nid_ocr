@@ -3,6 +3,8 @@ Egyptian ID Extraction Pipeline Service
 Orchestrates the complete OCR pipeline from image input to structured output.
 """
 
+import os
+import cv2
 import time
 import numpy as np
 from typing import Dict, Any, Optional, Tuple
@@ -183,13 +185,20 @@ class IDExtractionPipeline:
             # Preprocess for OCR
             processed = preprocess_text_field(field_img, field_type=field_name)
 
+            # Debug: save NID processed image to disk so we can see what Tesseract sees
+            if field_name in ["nid", "id_number", "front_nid", "back_nid"]:
+                import os
+                debug_dir = os.path.join("debug", "nid_viz")
+                os.makedirs(debug_dir, exist_ok=True)
+                cv2.imwrite(os.path.join(debug_dir, f"{field_name}_proc_{int(time.time()*1000)}.jpg"), processed)
+
             # Log NID preprocessing result
             if field_name in ["nid", "front_nid", "back_nid", "id_number"]:
                 logger.info(f"NID preprocessed: shape={processed.shape}, dtype={processed.dtype}")
 
             # Run OCR
             if self._ocr:
-                ocr_result = self._ocr.ocr_field(processed, field_name)
+                ocr_result = self._ocr.ocr_field(processed, field_name, raw_image=field_img)
                 text = ocr_result.text
                 ocr_conf = ocr_result.confidence
                 

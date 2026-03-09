@@ -105,10 +105,16 @@ def _validate_and_correct_nid(text: str) -> str:
         except ImportError:
             pass
     
-    # If length is wrong, try to fix
+    # If length is wrong, try to extract a valid 14-digit sequence before just truncating
     elif len(text) > 14:
-        # Take first 14 digits (most likely correct)
-        text = text[:14]
+        import re
+        # Look for [23] followed by 13 digits (rough heuristic for NID)
+        match = re.search(r'[23]\d{13}', text)
+        if match:
+            text = match.group(0)
+        else:
+            # Fallback to first 14 digits
+            text = text[:14]
     
     return text
 

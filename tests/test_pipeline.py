@@ -458,14 +458,15 @@ class TestPreprocessing:
     """Tests for image preprocessing."""
 
     def test_preprocess_digit_field(self):
-        """Test preprocessing for digit fields."""
+        """Test preprocessing for digit fields (NID returns RAW)."""
         image = np.random.randint(0, 256, (50, 200, 3), dtype=np.uint8)
         result = preprocess_text_field(image, field_type="nid")
 
-        # Should be grayscale
+        # NID fields now return RAW grayscale without preprocessing
+        # Should be grayscale (single channel)
         assert len(result.shape) == 2
-        # NID fields are upscaled to at least 120px for better digit recognition
-        assert result.shape[0] >= 120
+        # Should maintain original size (no upscaling for RAW)
+        assert result.shape == (50, 200)
 
     def test_preprocess_arabic_field(self):
         """Test preprocessing for Arabic text fields."""

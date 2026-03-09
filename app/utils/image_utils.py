@@ -317,21 +317,31 @@ def extract_all_rois(card_image: np.ndarray, side: str = "front") -> dict[str, n
 
 def preprocess_text_field(image: np.ndarray, field_type: str = "arabic") -> np.ndarray:
     """
-    Optimized preprocessing with NID-specific enhancements.
-
-    Key insight: EasyOCR and PaddleOCR have built-in preprocessing.
-    Heavy transforms (binarization, aggressive denoising) often hurt performance.
+    Preprocess field image based on field type for optimal OCR.
     
-    NID fields get specialized treatment for digit recognition.
+    For NID fields: Returns RAW image without any preprocessing to preserve
+    original digit quality and avoid artifacts from enhancement.
+    
+    For other fields: Uses appropriate preprocessing.
 
     Args:
         image: Input image
-        field_type: Type of field (nid, firstName, lastName, address, etc.)
+        field_type: Type of field (nid, firstName, lastName, address, serial, etc.)
 
     Returns:
-        Preprocessed image ready for OCR
+        Preprocessed (or raw) image ready for OCR
     """
-    # Convert to grayscale only if needed
+    # NID fields - return RAW image without any preprocessing
+    # Modern OCR engines (Tesseract, EasyOCR, PaddleOCR) have their own
+    # optimized preprocessing and work best with original images
+    if field_type in ["nid", "front_nid", "back_nid", "id_number"]:
+        logger.info(f"NID field: Using RAW image without preprocessing (shape={image.shape})")
+        # Just convert to grayscale if color, otherwise return as-is
+        if len(image.shape) == 3:
+            return cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        return image
+
+    # Convert to grayscale for other fields
     if len(image.shape) == 3:
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     else:
@@ -339,44 +349,46 @@ def preprocess_text_field(image: np.ndarray, field_type: str = "arabic") -> np.n
 
     h, w = gray.shape
 
-    # Upscale strategy - only if truly needed (minimum 48px height)
-    if h < 48:
-        scale = 48 / h
-        gray = cv2.resize(gray, (int(w * scale), 48), interpolation=cv2.INTER_CUBIC)
-        h = 48
+    # Upscale if too small (minimum 64px height)
+    if h < 64:
+        scale = 64 / h
+        gray = cv2.resize(gray, (int(w * scale), 64), interpolation=cv2.INTER_CUBIC)
 
     # Field-specific lightweight preprocessing
-    if field_type in ["nid", "front_nid", "back_nid", "id_number", "serial", "serial_num", "issue_code"]:
-        # NID-specific preprocessing for optimal digit recognition
-        return _preprocess_nid_field(gray, h, w)
-
-    elif field_type in ["firstName", "lastName", "name_ar", "address", "add_line_1", "add_line_2"]:
-        # Arabic text: minimal denoising, preserve text structure
+    if field_type in ["serial", "serial_num", "issue_code"]:
+        # Digit fields - minimal processing
         if h < 80:
             scale = 80 / h
             gray = cv2.resize(gray, (int(w * scale), 80), interpolation=cv2.INTER_CUBIC)
+        return gray
 
-        # Only apply very light bilateral filter if noisy (high variance)
-        if np.var(gray) > 2000:  # High variance indicates noise
+    # For Arabic text (names, address) - slight denoise only
+    elif field_type in ["firstName", "lastName", "address", "add_line_1", "add_line_2"]:
+        if h < 80:
+            scale = 80 / h
+            gray = cv2.resize(gray, (int(w * scale), 80), interpolation=cv2.INTER_CUBIC)
+        
+        # Light denoising if noisy
+        if np.var(gray) > 2000:
             gray = cv2.bilateralFilter(gray, d=5, sigmaColor=30, sigmaSpace=30)
         return gray
 
     elif field_type in ["issue_date", "expiry_date", "dob"]:
-        # Dates: similar to digits
+        # Dates - minimal processing
         if h < 64:
             scale = 64 / h
             gray = cv2.resize(gray, (int(w * scale), 64), interpolation=cv2.INTER_CUBIC)
         return gray
 
     elif field_type == "face":
-        # Photo: return original color image
+        # Photo: return original color
         return cv2.cvtColor(image, cv2.COLOR_BGR2RGB) if len(image.shape) == 3 else image
 
     elif field_type in ["front_logo", "back_logo"]:
         # Logos: return grayscale
         return gray
 
-    # Default: return grayscale with minimal processing
+    # Default: minimal processing
     if h < 80:
         scale = 80 / h
         gray = cv2.resize(gray, (int(w * scale), 80), interpolation=cv2.INTER_CUBIC)
