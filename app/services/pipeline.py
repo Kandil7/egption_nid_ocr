@@ -335,6 +335,11 @@ class IDExtractionPipeline:
                 normalized = auto_detect_and_warp(normalized)
                 normalized = remove_background_lines(normalized)
 
+                # Ensure normalized is BGR (3 channels) for extract_all_rois
+                if len(normalized.shape) == 2:  # Grayscale
+                    normalized = cv2.cvtColor(normalized, cv2.COLOR_GRAY2BGR)
+                    logger.info("Converted grayscale to BGR for ROI extraction")
+
                 # Detect side (front/back) on normalized card and use template ROIs
                 side = detect_card_side(normalized)
                 logger.info(f"Template ROI fallback using side='{side}'")

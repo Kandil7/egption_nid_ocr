@@ -483,8 +483,9 @@ class TestPreprocessing:
         image = np.random.randint(0, 256, (20, 50, 3), dtype=np.uint8)
         result = preprocess_text_field(image, field_type="nid")
 
-        # Should be upscaled to minimum size
-        assert result.shape[0] >= 48
+        # NID returns RAW - should maintain original size
+        assert len(result.shape) == 2
+        assert result.shape == (20, 50)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

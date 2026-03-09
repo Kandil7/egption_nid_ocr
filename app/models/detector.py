@@ -143,14 +143,17 @@ class ONNXFieldDetector:
         return batch, (sx, sy), (pad_w, pad_h)
     
     def _postprocess(self, output: np.ndarray, scale: Tuple[float, float], 
-                     padding: Tuple[int, int], conf_threshold: float = 0.35) -> List[Detection]:
+                     padding: Tuple[int, int], conf_threshold: float = 0.15) -> List[Detection]:
         """
         Post-process ONNX model output.
         
         Model output format: [batch, 21, anchors]
+        Based on YOLO detect_odjects.pt export:
         - 4: box coordinates [cx, cy, w, h]
-        - 1: objectness score
+        - 1: objectness score  
         - 16: class scores
+        
+        Use class scores directly for confidence (not objectness × class).
         
         Args:
             output: Model output [1, 21, anchors]
@@ -164,31 +167,43 @@ class ONNXFieldDetector:
         # Transpose to [anchors, 21]
         output = np.transpose(output[0], (1, 0))  # [anchors, 21]
         
-        # Log output statistics for debugging
+        # Log detailed output statistics
         max_objectness = float(np.max(output[:, 4]))
         max_class_score = float(np.max(output[:, 5:21]))
-        logger.info(f"ONNX output stats: max_objectness={max_objectness:.3f}, max_class_score={max_class_score:.3f}")
+        avg_objectness = float(np.mean(output[:, 4]))
+        
+        # Count high-confidence anchors
+        high_conf_anchors = np.sum(np.max(output[:, 5:21], axis=1) > 0.3)
+        
+        logger.info(f"ONNX stats: obj_max={max_objectness:.3f}, obj_avg={avg_objectness:.3f}, cls_max={max_class_score:.3f}, high_conf={high_conf_anchors}")
         
         detections = []
+        debug_dets = []
         
-        for anchor in output:
+        for i, anchor in enumerate(output):
             # Extract box coordinates [cx, cy, w, h]
             cx, cy, w, h = anchor[0:4]
             
-            # Extract objectness score
-            objectness = anchor[4]
+            # Extract objectness score (for filtering only)
+            objectness = float(anchor[4])
             
             # Extract class scores (16 classes)
-            class_scores = anchor[5:21]  # 16 class scores
+            class_scores = anchor[5:21]
             
             # Get best class
             class_id = int(np.argmax(class_scores))
             class_conf = float(class_scores[class_id])
             
-            # Combined confidence = objectness * class_confidence
-            conf = float(objectness * class_conf)
+            # Use class confidence directly (not objectness × class)
+            # Filter out very low objectness to remove background
+            conf = class_conf
             
-            if conf < conf_threshold:
+            # Log promising detections for debugging
+            if class_conf > 0.2 and objectness > 0.1:
+                debug_dets.append((i, class_id, objectness, class_conf, conf))
+            
+            # Filter: need both reasonable objectness AND class confidence
+            if objectness < 0.1 or conf < conf_threshold:
                 continue
             
             # Convert to [x1, y1, x2, y2]
@@ -212,39 +227,53 @@ class ONNXFieldDetector:
             detections.append(
                 Detection(
                     bbox=[int(x1), int(y1), int(x2), int(y2)],
-                    class_id=int(class_id),
+                    class_id=class_id,
                     class_name=class_name,
                     confidence=float(round(conf, 3)),
                 )
             )
         
+        # Log debug info
+        if debug_dets:
+            logger.info(f"ONNX promising: {[(self.FIELD_CLASSES.get(d[1], f'c{d[1]}'), round(d[2],3), round(d[3],3)) for d in debug_dets[:10]]}")
+        
+        logger.info(f"ONNX pre-NMS: {len(detections)} detections")
+        
         # Apply Non-Maximum Suppression (NMS)
         if detections:
             detections = self._apply_nms(detections)
         
+        logger.info(f"ONNX post-NMS: {len(detections)} detections")
+        
         return detections
     
-    def _apply_nms(self, detections: List[Detection], iou_threshold: float = 0.5) -> List[Detection]:
+    def _apply_nms(self, detections: List[Detection], iou_threshold: float = 0.7) -> List[Detection]:
         """Apply Non-Maximum Suppression to remove duplicate detections."""
         if not detections:
             return []
 
         # Log detections before NMS
-        logger.info(f"NMS input: {len(detections)} detections with confidences: {[d.confidence for d in detections]}")
+        logger.info(f"NMS input: {len(detections)} detections: {[f'{d.class_name}({d.confidence:.2f})' for d in detections]}")
         
         # Convert to format for NMS
         boxes = [d.bbox for d in detections]
         scores = [d.confidence for d in detections]
 
-        # OpenCV NMS - lower score_threshold to keep more detections
-        indices = cv2.dnn.NMSBoxes(boxes, scores, score_threshold=0.25, nms_threshold=iou_threshold)
+        # OpenCV NMS with very low score threshold
+        indices = cv2.dnn.NMSBoxes(boxes, scores, score_threshold=0.05, nms_threshold=iou_threshold)
 
-        if len(indices) > 0:
-            logger.info(f"NMS output: {len(indices)} detections")
-            return [detections[i] for i in indices]
+        # Handle different OpenCV return formats
+        if indices is not None and len(indices) > 0:
+            # Convert indices to list (handle both numpy array and list formats)
+            if hasattr(indices, 'flatten'):
+                indices = indices.flatten()
+            result = [detections[int(i)] for i in indices]
+            logger.info(f"NMS output: {len(result)} detections retained")
+            return result
         else:
-            logger.warning(f"NMS filtered out all {len(detections)} detections - returning all")
-            return detections  # Return all if NMS filters everything
+            # NMS filtered everything - return all detections (shouldn't happen)
+            logger.warning(f"NMS returned empty - keeping all {len(detections)} detections")
+            return detections
     
     def get_class_names(self) -> Dict[int, str]:
         """Get mapping of class IDs to field names."""
