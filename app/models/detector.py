@@ -322,6 +322,7 @@ class YOLODetector:
         """Initialize detector with the given model path."""
         self.model_path = model_path
         self.model = None
+        self.class_names = {}
 
         # Check if file exists
         import os
@@ -334,19 +335,25 @@ class YOLODetector:
             from ultralytics import YOLO
 
             self.model = YOLO(model_path)
-            logger.info(f"Loaded YOLO model: {model_path}")
+            # Get class names from the model itself
+            self.class_names = self.model.names
+            logger.info(f"Loaded YOLO model: {model_path} with {len(self.class_names)} classes")
         except Exception as e:
             logger.error(f"Failed to load YOLO model: {e}")
 
-    def detect(self, image: np.ndarray) -> List[Detection]:
+    def detect(self, image: np.ndarray, conf_threshold: float = None) -> List[Detection]:
         """Run detection on an image."""
         if self.model is None:
             logger.warning("No model loaded, returning empty detections")
             return []
 
+        # Use provided threshold or default from settings
+        if conf_threshold is None:
+            conf_threshold = settings.YOLO_CONF_THRESHOLD
+
         try:
             # Run inference
-            results = self.model(image, verbose=False)
+            results = self.model(image, verbose=False, conf=conf_threshold)
 
             detections = []
             for result in results:
@@ -356,13 +363,14 @@ class YOLODetector:
 
                 for box in boxes:
                     conf = float(box.conf[0])
-                    if conf < settings.YOLO_CONF_THRESHOLD:
+                    if conf < conf_threshold:
                         continue
 
                     class_id = int(box.cls[0])
                     xyxy = box.xyxy[0].tolist()
 
-                    class_name = settings.CLASS_NAMES.get(class_id, f"class_{class_id}")
+                    # Use class names from the model itself, not from settings
+                    class_name = self.class_names.get(class_id, f"class_{class_id}")
 
                     detections.append(
                         Detection(
@@ -436,59 +444,128 @@ class EgyptianIDDetector:
     def crop_fields(self, card_image: np.ndarray) -> Dict[str, Tuple[np.ndarray, float]]:
         """
         Detect and crop individual fields from the card image.
+
+        Uses ONNX field detector first (faster, more accurate),
+        falls back to YOLO detector if ONNX returns 0 detections.
         
-        Uses ONNX field detector if available (faster, more accurate),
-        otherwise falls back to YOLO detector.
+        Maps between ONNX class names (snake_case) and YOLO class names (camelCase).
         """
-        # Try ONNX detector first (lower threshold for better recall)
+        # Class name mapping: ONNX (snake_case) -> YOLO (camelCase)
+        # This allows both detectors to use the same canonical field names
+        ONNX_TO_CANONICAL = {
+            'first_name': 'firstName',
+            'last_name': 'lastName',
+            'add_line_1': 'addressLine1',
+            'add_line_2': 'addressLine2',
+            'front_nid': 'nid',
+            'back_nid': 'nid_back',
+            'serial_num': 'serial',
+            'issue_code': 'serial',  # Issue code is part of serial
+            'expiry_date': 'expiryDate',
+            'dob': 'dateOfBirth',
+            'job_title': 'jobTitle',
+            'gender': 'gender',
+            'religion': 'religion',
+            'marital_status': 'maritalStatus',
+            'face': 'photo',
+            'front_logo': 'frontLogo',
+            'address': 'address',
+        }
+        
+        # YOLO (detect_odjects.pt) to canonical mapping
+        YOLO_TO_CANONICAL = {
+            'firstName': 'firstName',
+            'lastName': 'lastName',
+            'nid': 'nid',
+            'nid_back': 'nid_back',
+            'serial': 'serial',
+            'issue': 'serial',  # Issue is part of serial
+            'expiry': 'expiryDate',
+            'dob': 'dateOfBirth',
+            'job': 'jobTitle',
+            'photo': 'photo',
+            'front_logo': 'frontLogo',
+            'address': 'address',
+            'poe': 'address',  # Place of employment -> address
+        }
+        
+        # Valid fields we want to extract
+        VALID_FIELDS = {'firstName', 'lastName', 'nid', 'serial', 'address', 
+                       'expiryDate', 'dateOfBirth', 'jobTitle', 'gender', 
+                       'religion', 'maritalStatus', 'photo', 'frontLogo'}
+
+        # Try ONNX detector first with lower threshold for better recall
         if self.field_detector_onnx.session is not None:
             try:
                 start_time = time.time()
-                detections = self.field_detector_onnx.detect(card_image, conf_threshold=0.30)
+                detections = self.field_detector_onnx.detect(card_image, conf_threshold=0.18)
                 onnx_time = (time.time() - start_time) * 1000
-                detected_classes = [d.class_name for d in detections]
-                logger.info(f"ONNX field detection: {len(detections)} fields in {onnx_time:.1f}ms - {detected_classes}")
                 
-                if detections:
-                    fields = {}
-                    for det in detections:
-                        x1, y1, x2, y2 = det.bbox
-
-                        # Ensure valid crop
-                        h, w = card_image.shape[:2]
-                        x1, y1 = max(0, x1), max(0, y1)
-                        x2, y2 = min(w, x2), min(h, y2)
-
-                        crop = card_image[y1:y2, x1:x2]
-                        if crop.size > 0:
-                            fields[det.class_name] = (crop, det.confidence)
-                            logger.debug(f"Field detected: {det.class_name} (conf: {det.confidence:.2f})")
+                # Map ONNX class names to canonical names
+                detected_fields = {}
+                for det in detections:
+                    canonical_name = ONNX_TO_CANONICAL.get(det.class_name, det.class_name)
                     
-                    if fields:
-                        return fields
-                        
+                    # Skip back_nid and invalid fields
+                    if det.class_name in ('back_nid',) or det.class_name.startswith('invalid_'):
+                        continue
+                    
+                    # Skip if not a valid field
+                    if canonical_name not in VALID_FIELDS:
+                        logger.debug(f"Skipping non-valid field: {det.class_name} -> {canonical_name}")
+                        continue
+                    
+                    x1, y1, x2, y2 = det.bbox
+                    h, w = card_image.shape[:2]
+                    x1, y1 = max(0, x1), max(0, y1)
+                    x2, y2 = min(w, x2), min(h, y2)
+                    
+                    crop = card_image[y1:y2, x1:x2]
+                    if crop.size > 0:
+                        detected_fields[canonical_name] = (crop, det.confidence)
+                
+                detected_classes = list(detected_fields.keys())
+                logger.info(f"ONNX field detection: {len(detected_fields)} fields in {onnx_time:.1f}ms - {detected_classes}")
+
+                if detected_fields:
+                    logger.info(f"ONNX successfully extracted {len(detected_fields)} fields")
+                    return detected_fields
+
+                logger.warning(f"ONNX returned {len(detections)} detections, falling back to YOLO")
+
             except Exception as e:
                 logger.warning(f"ONNX field detection failed: {e}, falling back to YOLO")
-        
-        # Fallback to YOLO detector
-        detections = self.field_detector_yolo.detect(card_image)
+
+        # Fallback to YOLO detector when ONNX fails or returns 0 detections
+        logger.info("Using YOLO field detector as fallback")
+        if self.field_detector_yolo.model is None:
+            logger.warning("YOLO model not loaded - cannot extract fields")
+            return {}
+            
+        detections = self.field_detector_yolo.detect(card_image, conf_threshold=0.25)
+
+        if not detections:
+            logger.warning("YOLO also returned 0 detections - no fields extracted")
+            return {}
 
         fields = {}
         for det in detections:
-            if det.class_name in settings.CLASS_NAMES.values():
+            canonical_name = YOLO_TO_CANONICAL.get(det.class_name, det.class_name)
+            
+            # Skip invalid_* detections
+            if det.class_name.startswith('invalid_'):
+                continue
+            
+            if canonical_name in VALID_FIELDS:
                 x1, y1, x2, y2 = det.bbox
-
-                # Ensure valid crop
                 h, w = card_image.shape[:2]
                 x1, y1 = max(0, x1), max(0, y1)
                 x2, y2 = min(w, x2), min(h, y2)
 
                 crop = card_image[y1:y2, x1:x2]
                 if crop.size > 0:
-                    fields[det.class_name] = (crop, det.confidence)
-                    logger.debug(f"Field detected: {det.class_name} (conf: {det.confidence:.2f})")
+                    fields[canonical_name] = (crop, det.confidence)
+                    logger.info(f"YOLO field detected: {det.class_name} -> {canonical_name} (conf: {det.confidence:.2f})")
 
-        if not fields:
-            logger.warning("No fields detected on the card")
-
+        logger.info(f"YOLO extracted {len(fields)} fields")
         return fields
