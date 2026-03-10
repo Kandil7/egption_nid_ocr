@@ -49,7 +49,21 @@ class FieldValidator:
         """
         errors = {}
 
-        if not parsed_id or not parsed_id.get("valid"):
+        # Handle both dict and ParsedNationalID dataclass
+        if parsed_id is None:
+            return errors
+        
+        # Convert ParsedNationalID dataclass to dict-like access
+        if hasattr(parsed_id, 'valid'):
+            # It's a ParsedNationalID dataclass
+            is_valid = parsed_id.valid
+            checksum_valid = getattr(parsed_id, 'checksum_valid', False)
+        else:
+            # It's a dict
+            is_valid = parsed_id.get("valid")
+            checksum_valid = parsed_id.get("checksum_valid", False)
+
+        if not is_valid:
             return errors
 
         # Validate NID length
@@ -59,7 +73,7 @@ class FieldValidator:
                 errors["nid_length"] = f"Expected 14 digits, got {len(nid)}"
             elif not nid.isdigit():
                 errors["nid_format"] = "NID contains non-digit characters"
-            elif not parsed_id.get("checksum_valid", False):
+            elif not checksum_valid:
                 errors["nid_checksum"] = "NID checksum validation failed"
 
         # Validate date formats
@@ -240,20 +254,20 @@ class IDExtractionPipeline:
         confidence_scores = {}
 
         # Fields we actually OCR to reduce runtime
+        # Includes ONNX field_detector.onnx classes (snake_case)
         ocr_fields = {
-            "nid",
-            "id_number",
-            "front_nid",
-            "back_nid",
-            "firstName",
-            "lastName",
-            "address",
-            "add_line_1",
-            "add_line_2",
-            "serial",
-            "serial_num",
-            "issue_date",
-            "expiry_date",
+            # ID numbers
+            "nid", "id_number", "front_nid", "back_nid",
+            # Names
+            "firstName", "lastName", "first_name", "last_name",
+            # Address
+            "address", "add_line_1", "add_line_2",
+            # Serial/Issue
+            "serial", "serial_num", "issue_date", "issue_code",
+            # Dates
+            "expiry_date", "dob",
+            # Other fields from ONNX model
+            "job_title", "gender", "religion", "marital_status",
         }
 
         # Filter to essential fields
@@ -365,11 +379,40 @@ class IDExtractionPipeline:
         # Use parallel processing
         extracted, confidence_scores = self._process_fields_parallel(yolo_fields)
 
+        # Normalize field names (ONNX snake_case -> API camelCase)
+        from app.core.config import FIELD_ALIASES
+        normalized_extracted = {}
+        normalized_confidence = {}
+        
+        for field_name, text in extracted.items():
+            canonical_name = FIELD_ALIASES.get(field_name, field_name)
+            
+            # Handle address lines concatenation
+            if field_name in ["add_line_1", "add_line_2"]:
+                if normalized_extracted.get("address"):
+                    # Append to existing address with space
+                    normalized_extracted["address"] = normalized_extracted["address"] + " " + text
+                    # Average the confidence scores
+                    existing_conf = normalized_confidence.get("address", 0.0)
+                    new_conf = confidence_scores.get(field_name, 0.0)
+                    normalized_confidence["address"] = (existing_conf + new_conf) / 2
+                else:
+                    normalized_extracted["address"] = text
+                    normalized_confidence["address"] = confidence_scores.get(field_name, 0.0)
+            else:
+                normalized_extracted[canonical_name] = text
+                normalized_confidence[canonical_name] = confidence_scores.get(field_name, 0.0)
+        
+        extracted = normalized_extracted
+        confidence_scores = normalized_confidence
+
         # 7. Parse national ID
         parsed_info = None
-        if "id_number" in extracted and extracted["id_number"]:
+        # Try multiple field names for NID
+        id_number = extracted.get("nid") or extracted.get("id_number")
+        if id_number:
             try:
-                parsed_info = parse_national_id(extracted["id_number"])
+                parsed_info = parse_national_id(id_number)
                 if not parsed_info.valid:
                     logger.warning(f"Invalid ID parsed: {parsed_info.error}")
             except Exception as e:
@@ -389,20 +432,22 @@ class IDExtractionPipeline:
 
         # Adjust confidence based on NID checksum validation
         if parsed_info and parsed_info.valid:
-            if "id_number" in confidence_scores:
+            # Handle both 'nid' and 'id_number' field names
+            nid_field = "nid" if "nid" in confidence_scores else "id_number"
+            if nid_field in confidence_scores:
                 if parsed_info.checksum_valid:
                     # Boost confidence if checksum is valid
-                    confidence_scores["id_number"] = min(
-                        1.0, confidence_scores.get("id_number", 0) + 0.15
+                    confidence_scores[nid_field] = min(
+                        1.0, confidence_scores.get(nid_field, 0) + 0.15
                     )
                     logger.debug(f"NID checksum valid - boosted confidence")
                 else:
                     # Reduce confidence if checksum invalid
-                    confidence_scores["id_number"] = max(
-                        0.0, confidence_scores.get("id_number", 0) - 0.20
+                    confidence_scores[nid_field] = max(
+                        0.0, confidence_scores.get(nid_field, 0) - 0.20
                     )
                     logger.warning(f"NID checksum invalid - reduced confidence")
-            
+
             # Recalculate overall confidence
             avg_conf = float(np.mean(list(confidence_scores.values())))
 

@@ -27,13 +27,32 @@ NASO7Y_CLASSES = {
     30: "watermark_tut",
 }
 
-# Canonical field mapping (our internal names -> NASO7Y names)
+# Canonical field mapping (ONNX field_detector.onnx snake_case -> API camelCase)
+# Maps model output names to standardized API response names
 FIELD_ALIASES = {
+    # Names
     "first_name": "firstName",
     "last_name": "lastName",
+    # ID card regions (not OCR'd, used for alignment)
     "front_nid": "nid",
+    "back_nid": "nid_back",
+    # Serial/Issue
     "serial_num": "serial",
+    "issue_code": "serial",  # Issue code is part of serial
+    "issue_date": "issueDate",
+    # Dates
+    "expiry_date": "expiryDate",
+    "dob": "dateOfBirth",
+    # Address (lines are concatenated)
+    "add_line_1": "addressLine1",
+    "add_line_2": "addressLine2",
     "address": "address",
+    # Other fields
+    "job_title": "jobTitle",
+    "gender": "gender",
+    "religion": "religion",
+    "marital_status": "maritalStatus",
+    "front_logo": "frontLogo",
 }
 
 # OCR engine routing based on field type
