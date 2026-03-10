@@ -26,39 +26,43 @@ class Detection:
 class ONNXFieldDetector:
     """
     Optimized ONNX-based field detector for Egyptian ID cards.
-    
+
     Uses ONNX Runtime for faster CPU inference compared to PyTorch.
-    Model output: [batch, 21, anchors] where 21 = 5 (bbox + conf) + 16 (classes)
-    
+    Model output: [batch, 21, anchors] where 21 = 4 (bbox) + 1 (objectness) + 16 (classes)
+    Note: Model has 17 classes in metadata but output only has 16 class scores.
+          Class 16 (dob) is not included in the output - model was likely exported with 16 classes.
+
     Advantages:
     - Faster inference on CPU (no GPU required)
     - Consistent performance across platforms
     - Lower memory footprint
     - Better for production deployment
-    
-    Class mapping (16 classes based on YOLO detect_odjects.pt):
-    Maps to most commonly used fields for Egyptian ID extraction.
+
+    Class mapping based on Ultralytics field_detector model metadata:
+    Names extracted from model.metadata_props['names']
     """
-    
-    # Field class mapping based on model output (16 classes)
-    # Mapped from YOLO detect_odjects.pt classes for compatibility
+
+    # Field class mapping based on actual ONNX model metadata (17 classes, indices 0-16)
+    # These are the exact class names from the model's training configuration
+    # Note: Model output has only 16 class scores (indices 0-15), 'dob' (class 16) is not in output
     FIELD_CLASSES = {
-        0: "firstName",      # YOLO class 4
-        1: "lastName",       # YOLO class 24
-        2: "nid",            # YOLO class 25
-        3: "serial",         # YOLO class 29
-        4: "address",        # YOLO class 0
-        5: "dob",            # YOLO class 2 (date of birth)
-        6: "issue",          # YOLO class 22 (issue date)
-        7: "expiry",         # YOLO class 3 (expiry date)
-        8: "job",            # YOLO class 23 (job title)
-        9: "poe",            # YOLO class 28 (place of employment)
-        10: "nid_back",      # YOLO class 26 (back of ID)
-        11: "photo",         # YOLO class 27 (photo region)
-        12: "front_logo",    # YOLO class 5 (front logo)
-        13: "demo",          # YOLO class 1 (demo region)
-        14: "watermark",     # YOLO class 30 (watermark)
-        15: "invalid_nid",   # YOLO class 16 (invalid NID detection)
+        0: "first_name",       # first name field
+        1: "last_name",        # last name field
+        2: "add_line_1",       # address line 1
+        3: "add_line_2",       # address line 2
+        4: "front_nid",        # front NID number
+        5: "back_nid",         # back NID number
+        6: "serial_num",       # serial number
+        7: "issue_code",       # issue code
+        8: "expiry_date",      # expiry date
+        9: "job_title",        # job title
+        10: "gender",          # gender field
+        11: "religion",        # religion field
+        12: "marital_status",  # marital status field
+        13: "face",            # face photo region
+        14: "front_logo",      # front logo
+        15: "address",         # general address field
+        16: "dob",             # date of birth (metadata only - not in model output)
     }
     
     def __init__(self, model_path: str = "weights/field_detector.onnx"):
@@ -67,37 +71,65 @@ class ONNXFieldDetector:
         self.session = None
         self.input_height = 640
         self.input_width = 640
-        
+        self.num_classes = 16  # Default based on output tensor (21 - 4 box - 1 obj = 16)
+
         import os
         if not os.path.exists(model_path):
             logger.warning(f"ONNX model not found: {model_path}")
             return
-        
+
         try:
             import onnxruntime as ort
-            
+            import onnx
+
             # Configure for optimal CPU performance
             providers = ['CPUExecutionProvider']
-            
+
             # Try to use OpenVINO for Intel CPUs (faster)
             try:
                 providers.insert(0, 'OpenVINOExecutionProvider')
             except:
                 pass
-            
+
             self.session = ort.InferenceSession(
-                model_path, 
+                model_path,
                 providers=providers,
                 providers_options=[{}]
             )
-            
+
             # Get input/output info
             inputs = self.session.get_inputs()
             self.input_name = inputs[0].name
             
+            # Determine num_classes from actual output shape
+            outputs = self.session.get_outputs()
+            output_shape = outputs[0].shape
+            self.num_classes = output_shape[1] - 5  # 21 - 5 = 16 classes
+
+            # Try to load class names from model metadata
+            try:
+                onnx_model = onnx.load(model_path)
+                for meta in onnx_model.metadata_props:
+                    if meta.key == 'names':
+                        # Parse the names dictionary from metadata
+                        # Format: {0: 'first_name', 1: 'last_name', ...}
+                        import ast
+                        metadata_classes = ast.literal_eval(meta.value)
+                        
+                        # Only use classes that are actually in the output
+                        # (metadata may have more classes than the output tensor)
+                        self.FIELD_CLASSES = {
+                            k: v for k, v in metadata_classes.items() 
+                            if k < self.num_classes
+                        }
+                        logger.info(f"Loaded {len(self.FIELD_CLASSES)} class names from ONNX metadata (output has {self.num_classes} classes)")
+                        break
+            except Exception as e:
+                logger.warning(f"Could not load class names from metadata: {e}, using defaults")
+
             logger.info(f"Loaded ONNX field detector: {model_path}")
-            logger.info(f"  Input: {inputs[0].shape}, Output: {self.session.get_outputs()[0].shape}")
-            
+            logger.info(f"  Input: {inputs[0].shape}, Output: {outputs[0].shape}, Classes: {self.num_classes}")
+
         except Exception as e:
             logger.error(f"Failed to load ONNX model: {e}")
             self.session = None
@@ -142,53 +174,54 @@ class ONNXFieldDetector:
         
         return batch, (sx, sy), (pad_w, pad_h)
     
-    def _postprocess(self, output: np.ndarray, scale: Tuple[float, float], 
+    def _postprocess(self, output: np.ndarray, scale: Tuple[float, float],
                      padding: Tuple[int, int], conf_threshold: float = 0.15) -> List[Detection]:
         """
         Post-process ONNX model output.
-        
-        Model output format: [batch, 21, anchors]
-        Based on YOLO detect_odjects.pt export:
-        - 4: box coordinates [cx, cy, w, h]
-        - 1: objectness score  
-        - 16: class scores
+
+        Model output format: [batch, num_values, anchors]
+        where num_values = 4 (box) + 1 (objectness) + num_classes
         
         Use class scores directly for confidence (not objectness × class).
-        
+
         Args:
-            output: Model output [1, 21, anchors]
+            output: Model output [1, num_values, anchors]
             scale: Scale factors (sx, sy)
             padding: Padding (pad_w, pad_h)
             conf_threshold: Confidence threshold
-            
+
         Returns:
             List of Detection objects
         """
-        # Transpose to [anchors, 21]
-        output = np.transpose(output[0], (1, 0))  # [anchors, 21]
+        # Transpose to [anchors, num_values]
+        output = np.transpose(output[0], (1, 0))  # [anchors, num_values]
         
+        # Dynamically determine number of classes from output shape
+        # output shape: [anchors, 4 (box) + 1 (obj) + num_classes]
+        num_classes = output.shape[1] - 5  # Subtract 4 box coords + 1 objectness
+
         # Log detailed output statistics
         max_objectness = float(np.max(output[:, 4]))
-        max_class_score = float(np.max(output[:, 5:21]))
+        max_class_score = float(np.max(output[:, 5:5+num_classes]))
         avg_objectness = float(np.mean(output[:, 4]))
-        
+
         # Count high-confidence anchors
-        high_conf_anchors = np.sum(np.max(output[:, 5:21], axis=1) > 0.3)
-        
-        logger.info(f"ONNX stats: obj_max={max_objectness:.3f}, obj_avg={avg_objectness:.3f}, cls_max={max_class_score:.3f}, high_conf={high_conf_anchors}")
-        
+        high_conf_anchors = np.sum(np.max(output[:, 5:5+num_classes], axis=1) > 0.3)
+
+        logger.info(f"ONNX stats: obj_max={max_objectness:.3f}, obj_avg={avg_objectness:.3f}, cls_max={max_class_score:.3f}, high_conf={high_conf_anchors}, num_classes={num_classes}")
+
         detections = []
         debug_dets = []
-        
+
         for i, anchor in enumerate(output):
             # Extract box coordinates [cx, cy, w, h]
             cx, cy, w, h = anchor[0:4]
-            
+
             # Extract objectness score (for filtering only)
             objectness = float(anchor[4])
-            
-            # Extract class scores (16 classes)
-            class_scores = anchor[5:21]
+
+            # Extract class scores (dynamically determined)
+            class_scores = anchor[5:5+num_classes]
             
             # Get best class
             class_id = int(np.argmax(class_scores))
@@ -450,8 +483,11 @@ class EgyptianIDDetector:
         
         Maps between ONNX class names (snake_case) and YOLO class names (camelCase).
         """
-        # Class name mapping: ONNX (snake_case) -> YOLO (camelCase)
-        # This allows both detectors to use the same canonical field names
+        # Class name mapping: ONNX (snake_case) -> canonical names
+        # Based on actual ONNX model metadata from weights/field_detector.onnx
+        # Model class names: first_name, last_name, add_line_1, add_line_2, front_nid,
+        #                    back_nid, serial_num, issue_code, expiry_date, job_title,
+        #                    gender, religion, marital_status, face, front_logo, address, dob
         ONNX_TO_CANONICAL = {
             'first_name': 'firstName',
             'last_name': 'lastName',
@@ -505,11 +541,11 @@ class EgyptianIDDetector:
                 detected_fields = {}
                 for det in detections:
                     canonical_name = ONNX_TO_CANONICAL.get(det.class_name, det.class_name)
-                    
-                    # Skip back_nid and invalid fields
-                    if det.class_name in ('back_nid',) or det.class_name.startswith('invalid_'):
+
+                    # Skip back_nid and other unwanted fields
+                    if det.class_name in ('back_nid',):
                         continue
-                    
+
                     # Skip if not a valid field
                     if canonical_name not in VALID_FIELDS:
                         logger.debug(f"Skipping non-valid field: {det.class_name} -> {canonical_name}")
