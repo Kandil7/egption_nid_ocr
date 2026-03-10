@@ -79,6 +79,18 @@ class Settings(BaseSettings):
     # OCR Settings
     OCR_CPU_THREADS: int = Field(default=4, description="Number of CPU threads for OCR")
     OCR_ENABLE_MKL: bool = Field(default=True, description="Enable Intel MKL-DNN acceleration")
+    PADDLE_USE_GPU: bool = Field(default=False, description="Use GPU for PaddleOCR if available")
+    PADDLE_AR_REC_MODEL_DIR: str = Field(
+        default="", description="Optional custom directory for Arabic PaddleOCR rec model"
+    )
+    PADDLE_DIGIT_REC_MODEL_DIR: str = Field(
+        default="",
+        description="Optional custom directory for digit/Latin PaddleOCR PP-OCRv4 rec model",
+    )
+    TESSDATA_DIR: str = Field(
+        default="./weights",
+        description="Directory containing Tesseract trained data files",
+    )
 
     # Card Field Class IDs (NASO7Y schema)
     CLASS_ID_CARD: int = Field(default=0, description="Class ID for card detection")
@@ -90,13 +102,15 @@ class Settings(BaseSettings):
     RECTIFIED_SIZE: tuple = Field(
         default=(1024, 640), description="Rectified card size (width, height)"
     )
+    TARGET_IMAGE_WIDTH: int = Field(
+        default=900, description="Target width for image resizing and normalization"
+    )
 
     # Image Validation Settings
     MAX_IMAGE_SIZE_MB: int = Field(default=10, description="Maximum allowed image size in MB")
     MIN_QUALITY_SCORE: float = Field(
         default=0.35, description="Minimum acceptable image quality score"
     )
-    TARGET_IMAGE_WIDTH: int = Field(default=1200, description="Target width for image resizing")
 
     # Logging Settings
     LOG_LEVEL: str = Field(

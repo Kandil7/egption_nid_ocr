@@ -81,8 +81,36 @@ async def visualize_fields(file: UploadFile = File(...)):
                 result_image, "Card", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2
             )
 
-        # Detect fields
-        field_dets = detector.field_detector.detect(card_img)
+        # Detect fields using ONNX detector directly to get bounding boxes
+        field_dets = []
+        
+        # Try ONNX detector first
+        if detector.field_detector_onnx.session is not None:
+            try:
+                field_dets = detector.field_detector_onnx.detect(card_img, conf_threshold=0.30)
+                logger.info(f"Visualize: ONNX detected {len(field_dets)} fields")
+            except Exception as e:
+                logger.warning(f"ONNX detection failed in visualize: {e}")
+        
+        # Fallback to YOLO if ONNX found nothing
+        if not field_dets and detector.field_detector_yolo.model is not None:
+            field_dets = detector.field_detector_yolo.detect(card_img)
+            logger.info(f"Visualize: YOLO detected {len(field_dets)} fields")
+        
+        # If still no detections, use crop_fields as last resort
+        if not field_dets:
+            fields_dict = detector.crop_fields(card_img)
+            from app.models.detector import Detection
+            for class_name, (crop_img, conf) in fields_dict.items():
+                h, w = crop_img.shape[:2]
+                field_dets.append(
+                    Detection(
+                        bbox=[0, 0, w, h],
+                        class_id=0,
+                        class_name=class_name,
+                        confidence=float(conf),
+                    )
+                )
 
         # Color for each class
         colors = {
@@ -91,6 +119,9 @@ async def visualize_fields(file: UploadFile = File(...)):
             "nid": (0, 128, 255),
             "serial": (255, 255, 0),
             "address": (255, 0, 255),
+            "dob": (255, 128, 0),
+            "issue": (128, 0, 255),
+            "expiry": (0, 255, 128),
         }
 
         for det in field_dets:
@@ -151,11 +182,26 @@ async def debug_detection(file: UploadFile = File(...)):
     try:
         # Get all detections
         card_dets = detector.card_detector.detect(image)
-        field_dets = detector.field_detector.detect(image)
+        
+        # Use crop_fields to get field detections (works with ONNX or YOLO)
+        fields_dict = detector.crop_fields(image)
+        
+        # Convert to detection list
+        from app.models.detector import Detection
+        field_dets = []
+        for class_name, (crop_img, conf) in fields_dict.items():
+            h, w = crop_img.shape[:2]
+            field_dets.append(
+                Detection(
+                    bbox=[0, 0, w, h],
+                    class_id=0,
+                    class_name=class_name,
+                    confidence=float(conf),  # Convert numpy float to Python float
+                )
+            )
 
-        # Get model class names
-        model = detector.field_detector.model
-        class_names = model.names if model else {}
+        # Get model class names from detector
+        class_names = detector.get_field_class_names()
 
         return JSONResponse(
             content={

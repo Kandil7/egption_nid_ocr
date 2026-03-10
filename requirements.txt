@@ -12,8 +12,8 @@ ultralytics==8.3.60           # For YOLO export only
 paddlepaddle==2.6.2            # PaddleOCR backend
 paddleocr==2.9.1               # Arabic OCR
 easyocr==1.7.2                 # Digits + English OCR
-torch==2.5.1+cpu               # CPU-only PyTorch
-torchvision==0.20.1+cpu
+torch==2.5.1                   # CPU-only PyTorch (no custom +cpu tag)
+torchvision==0.20.1
 
 # ─── Image Processing ────────────────────────────────────
 opencv-python-headless==4.11.0.86
@@ -28,6 +28,7 @@ pydantic-settings==2.7.1
 # ─── Logging & Utils ─────────────────────────────────────
 loguru==0.7.3
 python-dotenv==1.0.1
+pytesseract==0.3.13            # Tesseract OCR wrapper
 
 # ─── Testing ─────────────────────────────────────────────
 pytest==8.3.4

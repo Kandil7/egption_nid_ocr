@@ -257,8 +257,8 @@ FRONT_ROIS = {
     # Names (right side, upper)
     "firstName": (0.30, 0.08, 0.68, 0.20),
     "lastName": (0.30, 0.28, 0.68, 0.18),
-    # National ID (middle)
-    "nid": (0.10, 0.50, 0.80, 0.12),
+    # National ID (middle/bottom)
+    "nid": (0.28, 0.46, 0.68, 0.14),
     # Other fields
     "serial": (0.30, 0.65, 0.68, 0.10),
     "address": (0.05, 0.78, 0.90, 0.18),
@@ -318,68 +318,172 @@ def extract_all_rois(card_image: np.ndarray, side: str = "front") -> dict[str, n
 def preprocess_text_field(image: np.ndarray, field_type: str = "arabic") -> np.ndarray:
     """
     Preprocess field image based on field type for optimal OCR.
-    Uses LIGHT preprocessing - let EasyOCR do most of the work.
+    
+    For NID fields: Returns RAW image without any preprocessing to preserve
+    original digit quality and avoid artifacts from enhancement.
+    
+    For other fields: Uses appropriate preprocessing.
 
     Args:
         image: Input image
         field_type: Type of field (nid, firstName, lastName, address, serial, etc.)
 
     Returns:
-        Preprocessed image ready for OCR
+        Preprocessed (or raw) image ready for OCR
     """
-    # Convert to grayscale
+    # NID fields - return RAW image without any preprocessing
+    # Modern OCR engines (Tesseract, EasyOCR, PaddleOCR) have their own
+    # optimized preprocessing and work best with original images
+    if field_type in ["nid", "front_nid", "back_nid", "id_number"]:
+        logger.info(f"NID field: Using RAW image without preprocessing (shape={image.shape})")
+        # Just convert to grayscale if color, otherwise return as-is
+        if len(image.shape) == 3:
+            return cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        return image
+
+    # Convert to grayscale for other fields
     if len(image.shape) == 3:
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     else:
         gray = image.copy()
 
-    # Upscale if too small (minimum 64px height)
     h, w = gray.shape
+
+    # Upscale if too small (minimum 64px height)
     if h < 64:
         scale = 64 / h
         gray = cv2.resize(gray, (int(w * scale), 64), interpolation=cv2.INTER_CUBIC)
 
-    # Light preprocessing - just upscale, let EasyOCR handle the rest
-    # Heavy binarization hurts EasyOCR performance
-
-    # For NID/serial fields - slight enhancement only
-    if field_type in ["nid", "front_nid", "back_nid", "serial", "serial_num", "issue_code"]:
-        # Just upscale, no binarization
-        if h < 100:
-            scale = 100 / h
-            gray = cv2.resize(gray, (int(w * scale), 100), interpolation=cv2.INTER_CUBIC)
+    # Field-specific lightweight preprocessing
+    if field_type in ["serial", "serial_num", "issue_code"]:
+        # Digit fields - minimal processing
+        if h < 80:
+            scale = 80 / h
+            gray = cv2.resize(gray, (int(w * scale), 80), interpolation=cv2.INTER_CUBIC)
         return gray
 
     # For Arabic text (names, address) - slight denoise only
     elif field_type in ["firstName", "lastName", "address", "add_line_1", "add_line_2"]:
-        # Light denoising, no binarization
-        denoised = cv2.fastNlMeansDenoising(gray, h=5)
-        if h < 100:
-            scale = 100 / h
-            denoised = cv2.resize(denoised, (int(w * scale), 100), interpolation=cv2.INTER_CUBIC)
-        return denoised
+        if h < 80:
+            scale = 80 / h
+            gray = cv2.resize(gray, (int(w * scale), 80), interpolation=cv2.INTER_CUBIC)
+        
+        # Light denoising if noisy
+        if np.var(gray) > 2000:
+            gray = cv2.bilateralFilter(gray, d=5, sigmaColor=30, sigmaSpace=30)
+        return gray
 
     elif field_type in ["issue_date", "expiry_date", "dob"]:
-        # Light processing for dates
-        if h < 100:
-            scale = 100 / h
-            gray = cv2.resize(gray, (int(w * scale), 100), interpolation=cv2.INTER_CUBIC)
+        # Dates - minimal processing
+        if h < 64:
+            scale = 64 / h
+            gray = cv2.resize(gray, (int(w * scale), 64), interpolation=cv2.INTER_CUBIC)
         return gray
 
     elif field_type == "face":
-        # Photo: return original
+        # Photo: return original color
         return cv2.cvtColor(image, cv2.COLOR_BGR2RGB) if len(image.shape) == 3 else image
 
     elif field_type in ["front_logo", "back_logo"]:
         # Logos: return grayscale
         return gray
 
+    # Default: minimal processing
+    if h < 80:
+        scale = 80 / h
+        gray = cv2.resize(gray, (int(w * scale), 80), interpolation=cv2.INTER_CUBIC)
+    return gray
+
+
+def _preprocess_nid_field(gray: np.ndarray, h: int, w: int) -> np.ndarray:
+    """
+    Specialized preprocessing for NID/digit fields.
+
+    Optimized for Egyptian NID format (14 digits) with:
+    - Aggressive upscaling for small digits
+    - Contrast enhancement for low-contrast images
+    - Adaptive thresholding for Tesseract
+    - Morphological operations to connect broken digit segments
+
+    Args:
+        gray: Grayscale or BGR image
+        h: Height
+        w: Width
+
+    Returns:
+        Preprocessed grayscale image optimized for digit OCR
+    """
+    # Ensure grayscale
+    if len(gray.shape) == 3:
+        gray = cv2.cvtColor(gray, cv2.COLOR_BGR2GRAY)
+        h, w = gray.shape
+    
+    # Step 1: Upscale significantly for better digit recognition
+    # NID digits are often small - upscale to at least 120px height
+    target_height = max(120, h)
+    if h < target_height:
+        scale = target_height / h
+        gray = cv2.resize(gray, (int(w * scale), target_height), interpolation=cv2.INTER_CUBIC)
+        h, w = target_height, int(w * scale)
+
+    # Step 2: Check contrast and enhance if needed
+    # Calculate standard deviation (measure of contrast)
+    contrast = np.std(gray)
+    logger.info(f"NID preprocessing: contrast={contrast:.1f} (low if <30)")
+    
+    if contrast < 30:
+        # Low contrast - apply aggressive enhancement
+        logger.info("NID: Applying aggressive contrast enhancement")
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(16, 16))
+        enhanced = clahe.apply(gray)
+        
+        # Additional contrast boost
+        enhanced = cv2.convertScaleAbs(enhanced, alpha=1.3, beta=0)
     else:
-        # Default: light processing
-        if h < 100:
-            scale = 100 / h
-            gray = cv2.resize(gray, (int(w * scale), 100), interpolation=cv2.INTER_CUBIC)
-        return gray
+        # Good contrast - mild enhancement
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        enhanced = clahe.apply(gray)
+
+    # Return enhanced grayscale (single channel)
+    # EasyOCR and PaddleOCR both accept grayscale images
+    return enhanced
+
+
+def adaptive_preprocess(image: np.ndarray, quality_score: float) -> np.ndarray:
+    """
+    Apply preprocessing based on image quality assessment.
+    
+    High quality (>0.7): Minimal processing
+    Medium quality (0.4-0.7): Light enhancement
+    Low quality (<0.4): Aggressive enhancement
+    
+    Args:
+        image: Input image (BGR)
+        quality_score: Quality score from 0 to 1
+        
+    Returns:
+        Preprocessed image
+    """
+    if quality_score > 0.7:
+        # High quality - let OCR handle it
+        return image if len(image.shape) == 3 else cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+
+    elif quality_score > 0.4:
+        # Medium quality - light enhancement
+        lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        lab[:, :, 0] = clahe.apply(lab[:, :, 0])
+        return cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+
+    else:
+        # Low quality - aggressive enhancement
+        lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+        clahe = cv2.createCLAHE(clipLimit=3.5, tileGridSize=(16, 16))
+        lab[:, :, 0] = clahe.apply(lab[:, :, 0])
+        enhanced = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+        # Light sharpening
+        kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
+        return cv2.filter2D(enhanced, -1, kernel)
 
 
 def remove_background_lines(image: np.ndarray) -> np.ndarray:

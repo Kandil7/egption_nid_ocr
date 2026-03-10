@@ -3,10 +3,13 @@ Egyptian ID Extraction Pipeline Service
 Orchestrates the complete OCR pipeline from image input to structured output.
 """
 
+import os
+import cv2
 import time
 import numpy as np
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple
 from dataclasses import dataclass, asdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from app.models.detector import EgyptianIDDetector
 from app.models.ocr_engine import OCREngine
@@ -14,11 +17,17 @@ from app.models.id_parser import parse_national_id
 from app.utils.image_utils import (
     decode_image,
     deskew,
-    full_preprocess_pipeline,
     extract_all_rois,
     preprocess_text_field,
+    resize_to_standard,
+    remove_noise,
+    enhance_contrast,
+    auto_detect_and_warp,
+    remove_background_lines,
+    detect_card_side,
 )
 from app.utils.text_utils import clean_field
+from app.utils.cache import ocr_cache
 from app.core.config import settings
 from app.core.logger import logger
 
@@ -26,6 +35,41 @@ from app.core.logger import logger
 # Field classification
 ARABIC_FIELDS = {"name_ar", "address", "nationality", "gender"}
 DIGIT_FIELDS = {"id_number"}
+
+
+class FieldValidator:
+    """Cross-field validation for ID data consistency."""
+
+    @staticmethod
+    def validate(parsed_id: Optional[Dict], extracted: Dict[str, str]) -> Dict[str, str]:
+        """
+        Validate consistency between extracted fields and parsed ID data.
+
+        Returns dict of validation errors/warnings.
+        """
+        errors = {}
+
+        if not parsed_id or not parsed_id.get("valid"):
+            return errors
+
+        # Validate NID length
+        if "id_number" in extracted:
+            nid = extracted["id_number"]
+            if len(nid) != 14:
+                errors["nid_length"] = f"Expected 14 digits, got {len(nid)}"
+            elif not nid.isdigit():
+                errors["nid_format"] = "NID contains non-digit characters"
+            elif not parsed_id.get("checksum_valid", False):
+                errors["nid_checksum"] = "NID checksum validation failed"
+
+        # Validate date formats
+        for date_field in ["issue_date", "expiry_date"]:
+            if date_field in extracted and extracted[date_field]:
+                date_text = extracted[date_field]
+                if len(date_text) < 8:  # Too short for any date format
+                    errors[f"{date_field}_format"] = "Date appears incomplete"
+
+        return errors
 
 
 @dataclass
@@ -47,6 +91,7 @@ class IDExtractionPipeline:
     _instance = None
     _detector: Optional[EgyptianIDDetector] = None
     _ocr: Optional[OCREngine] = None
+    _executor: Optional[ThreadPoolExecutor] = None
 
     def __new__(cls):
         """Singleton pattern - ensure only one instance exists."""
@@ -61,6 +106,12 @@ class IDExtractionPipeline:
             return
 
         logger.info("Initializing ID Extraction Pipeline...")
+
+        # Initialize thread pool executor
+        if IDExtractionPipeline._executor is None:
+            IDExtractionPipeline._executor = ThreadPoolExecutor(
+                max_workers=settings.OCR_CPU_THREADS
+            )
 
         # Auto-initialize models if not already done
         if IDExtractionPipeline._detector is None:
@@ -106,6 +157,129 @@ class IDExtractionPipeline:
 
         logger.info("Pipeline initialized")
 
+    def _process_single_field(
+        self, field_name: str, field_img: np.ndarray, det_conf: float
+    ) -> Tuple[str, str, float]:
+        """
+        Process a single field - extracted for parallelization.
+
+        Args:
+            field_name: Name of the field
+            field_img: Field image numpy array
+            det_conf: Detection confidence from YOLO
+
+        Returns:
+            Tuple of (field_name, cleaned_text, confidence)
+        """
+        try:
+            # Check cache first
+            cached = ocr_cache.get(field_img, field_name)
+            if cached is not None:
+                logger.debug(f"Cache HIT for {field_name}")
+                return field_name, cached["text"], cached["confidence"]
+
+            # Log field image properties for debugging NID issues
+            if field_name in ["nid", "front_nid", "back_nid", "id_number"]:
+                logger.info(f"NID field '{field_name}': shape={field_img.shape}, det_conf={det_conf:.2f}")
+
+            # Preprocess for OCR
+            processed = preprocess_text_field(field_img, field_type=field_name)
+
+            # Debug: save NID processed image to disk so we can see what Tesseract sees
+            if field_name in ["nid", "id_number", "front_nid", "back_nid"]:
+                import os
+                debug_dir = os.path.join("debug", "nid_viz")
+                os.makedirs(debug_dir, exist_ok=True)
+                cv2.imwrite(os.path.join(debug_dir, f"{field_name}_proc_{int(time.time()*1000)}.jpg"), processed)
+
+            # Log NID preprocessing result
+            if field_name in ["nid", "front_nid", "back_nid", "id_number"]:
+                logger.info(f"NID preprocessed: shape={processed.shape}, dtype={processed.dtype}")
+
+            # Run OCR
+            if self._ocr:
+                ocr_result = self._ocr.ocr_field(processed, field_name, raw_image=field_img)
+                text = ocr_result.text
+                ocr_conf = ocr_result.confidence
+                
+                # Log NID OCR result
+                if field_name in ["nid", "front_nid", "back_nid", "id_number"]:
+                    logger.info(f"NID OCR result: text='{text}' (len={len(text)}), conf={ocr_conf:.2f}, engine={ocr_result.engine_used}")
+            else:
+                # Fallback: return empty
+                text = ""
+                ocr_conf = 0.0
+
+            # Clean text
+            cleaned = clean_field(text, field_name)
+
+            # Cache the result
+            ocr_cache.set(field_img, field_name, {"text": text, "confidence": ocr_conf})
+
+            # Calculate confidence
+            conf = (det_conf + ocr_conf) / 2 if det_conf > 0 else ocr_conf
+            return field_name, cleaned, round(conf, 3)
+
+        except Exception as e:
+            logger.error(f"OCR failed for field {field_name}: {e}")
+            return field_name, "", 0.0
+
+    def _process_fields_parallel(
+        self, yolo_fields: Dict[str, Tuple[np.ndarray, float]]
+    ) -> Tuple[Dict[str, str], Dict[str, float]]:
+        """
+        Process all fields in parallel using thread pool.
+
+        Args:
+            yolo_fields: Dictionary of field_name -> (image, detection_confidence)
+
+        Returns:
+            Tuple of (extracted_texts, confidence_scores)
+        """
+        extracted = {}
+        confidence_scores = {}
+
+        # Fields we actually OCR to reduce runtime
+        ocr_fields = {
+            "nid",
+            "id_number",
+            "front_nid",
+            "back_nid",
+            "firstName",
+            "lastName",
+            "address",
+            "add_line_1",
+            "add_line_2",
+            "serial",
+            "serial_num",
+            "issue_date",
+            "expiry_date",
+        }
+
+        # Filter to essential fields
+        fields_to_process = {
+            k: v for k, v in yolo_fields.items() if k in ocr_fields
+        }
+
+        # Submit all tasks
+        futures = {
+            self._executor.submit(
+                self._process_single_field,
+                field_name,
+                field_img,
+                det_conf,
+            ): field_name
+            for field_name, (field_img, det_conf) in fields_to_process.items()
+        }
+
+        # Collect results as they complete
+        for future in as_completed(futures):
+            field_name, text, conf = future.result()
+            extracted[field_name] = text
+            confidence_scores[field_name] = conf
+
+        return extracted, confidence_scores
+
     def process(self, image_bytes: bytes) -> Dict[str, Any]:
         """
         Process an image and extract ID information.
@@ -147,15 +321,33 @@ class IDExtractionPipeline:
             except Exception as e:
                 logger.warning(f"Field detection failed: {e}")
 
-        # 5. Extract ROIs (fallback to coordinates)
+        # 5. Extract ROIs (fallback to template-based layout on normalized card)
         if not yolo_fields:
             try:
-                from app.utils.image_utils import detect_card_side
+                # Layout-aware preprocessing for fallback path:
+                # - Resize to canonical width
+                # - Denoise & enhance contrast
+                # - Perspective correction & deskew
+                # - Background line removal
+                normalized = resize_to_standard(card_image, target_width=settings.TARGET_IMAGE_WIDTH)
+                normalized = remove_noise(normalized)
+                normalized = enhance_contrast(normalized)
+                normalized = auto_detect_and_warp(normalized)
+                normalized = remove_background_lines(normalized)
 
-                side = detect_card_side(card_image)
-                yolo_fields = extract_all_rois(card_image, side=side)
-                # Convert to tuple format for OCR
-                yolo_fields = {k: (v, 0.5) for k, v in yolo_fields.items()}
+                # Ensure normalized is BGR (3 channels) for extract_all_rois
+                if len(normalized.shape) == 2:  # Grayscale
+                    normalized = cv2.cvtColor(normalized, cv2.COLOR_GRAY2BGR)
+                    logger.info("Converted grayscale to BGR for ROI extraction")
+
+                # Detect side (front/back) on normalized card and use template ROIs
+                side = detect_card_side(normalized)
+                logger.info(f"Template ROI fallback using side='{side}'")
+                template_rois = extract_all_rois(normalized, side=side)
+
+                # Convert to tuple format for OCR, assign mid-level detection confidence
+                yolo_fields = {k: (v, 0.5) for k, v in template_rois.items()}
+                card_image = normalized
             except Exception as e:
                 logger.warning(f"ROI extraction failed: {e}")
                 yolo_fields = {}
@@ -166,37 +358,12 @@ class IDExtractionPipeline:
                 "processing_ms": int((time.time() - start_time) * 1000),
             }
 
-        # 6. OCR for each field
-        extracted = {}
-        confidence_scores = {}
+        # 6. OCR for each field (using parallel processing)
+        extracted: Dict[str, str] = {}
+        confidence_scores: Dict[str, float] = {}
 
-        for field_name, (field_img, det_conf) in yolo_fields.items():
-            try:
-                # Preprocess for OCR
-                processed = preprocess_text_field(field_img, field_type=field_name)
-
-                # Run OCR
-                if self._ocr:
-                    ocr_result = self._ocr.ocr_field(processed, field_name)
-                    text = ocr_result.text
-                    ocr_conf = ocr_result.confidence
-                else:
-                    # Fallback: return empty
-                    text = ""
-                    ocr_conf = 0.0
-
-                # Clean text
-                cleaned = clean_field(text, field_name)
-                extracted[field_name] = cleaned
-
-                # Calculate confidence
-                conf = (det_conf + ocr_conf) / 2 if det_conf > 0 else ocr_conf
-                confidence_scores[field_name] = round(conf, 3)
-
-            except Exception as e:
-                logger.error(f"OCR failed for field {field_name}: {e}")
-                extracted[field_name] = ""
-                confidence_scores[field_name] = 0.0
+        # Use parallel processing
+        extracted, confidence_scores = self._process_fields_parallel(yolo_fields)
 
         # 7. Parse national ID
         parsed_info = None
@@ -208,11 +375,36 @@ class IDExtractionPipeline:
             except Exception as e:
                 logger.error(f"ID parsing failed: {e}")
 
+        # 7b. Cross-field validation
+        validator = FieldValidator()
+        validation_errors = validator.validate(parsed_info, extracted)
+        if validation_errors:
+            logger.warning(f"Validation errors: {validation_errors}")
+
         # 8. Calculate overall confidence
         if confidence_scores:
             avg_conf = float(np.mean(list(confidence_scores.values())))
         else:
             avg_conf = 0.0
+
+        # Adjust confidence based on NID checksum validation
+        if parsed_info and parsed_info.valid:
+            if "id_number" in confidence_scores:
+                if parsed_info.checksum_valid:
+                    # Boost confidence if checksum is valid
+                    confidence_scores["id_number"] = min(
+                        1.0, confidence_scores.get("id_number", 0) + 0.15
+                    )
+                    logger.debug(f"NID checksum valid - boosted confidence")
+                else:
+                    # Reduce confidence if checksum invalid
+                    confidence_scores["id_number"] = max(
+                        0.0, confidence_scores.get("id_number", 0) - 0.20
+                    )
+                    logger.warning(f"NID checksum invalid - reduced confidence")
+            
+            # Recalculate overall confidence
+            avg_conf = float(np.mean(list(confidence_scores.values())))
 
         level = "high" if avg_conf > 0.85 else "medium" if avg_conf > 0.6 else "low"
 
@@ -236,6 +428,7 @@ class IDExtractionPipeline:
                 "gender": parsed_info.gender,
                 "age": parsed_info.age,
                 "sequence": parsed_info.sequence,
+                "checksum_valid": parsed_info.checksum_valid,  # Include checksum status
             }
 
         logger.info(f"Extraction complete in {processing_ms}ms")
