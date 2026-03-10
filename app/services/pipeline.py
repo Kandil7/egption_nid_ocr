@@ -248,8 +248,8 @@ class IDExtractionPipeline:
             "firstName",
             "lastName",
             "address",
-            "add_line_1",
-            "add_line_2",
+            "addressLine1",
+            "addressLine2",
             "serial",
             "serial_num",
             "issue_date",
@@ -364,6 +364,30 @@ class IDExtractionPipeline:
 
         # Use parallel processing
         extracted, confidence_scores = self._process_fields_parallel(yolo_fields)
+
+        # 6b. Combine address lines into single address field if needed
+        if "addressLine1" in extracted or "addressLine2" in extracted:
+            address_parts = []
+            address_conf = []
+            
+            if "addressLine1" in extracted and extracted["addressLine1"]:
+                address_parts.append(extracted["addressLine1"])
+                address_conf.append(confidence_scores.get("addressLine1", 0.5))
+            
+            if "addressLine2" in extracted and extracted["addressLine2"]:
+                address_parts.append(extracted["addressLine2"])
+                address_conf.append(confidence_scores.get("addressLine2", 0.5))
+            
+            if address_parts:
+                # Combine address lines
+                combined_address = " ".join(address_parts)
+                combined_conf = float(np.mean(address_conf)) if address_conf else 0.5
+                
+                # Store as 'address' field (or keep separate lines too)
+                if "address" not in extracted or not extracted["address"]:
+                    extracted["address"] = combined_address
+                    confidence_scores["address"] = combined_conf
+                    logger.info(f"Combined address lines: {combined_address}")
 
         # 7. Parse national ID
         parsed_info = None

@@ -182,9 +182,10 @@ async def debug_detection(file: UploadFile = File(...)):
     try:
         # Get all detections
         card_dets = detector.card_detector.detect(image)
-        
-        # Use crop_fields to get field detections (works with ONNX or YOLO)
-        fields_dict = detector.crop_fields(image)
+
+        # Crop card first, then use crop_fields to get field detections
+        card_img = detector.crop_card(image)
+        fields_dict = detector.crop_fields(card_img)
         
         # Convert to detection list
         from app.models.detector import Detection

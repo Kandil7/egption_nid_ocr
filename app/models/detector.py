@@ -28,9 +28,10 @@ class ONNXFieldDetector:
     Optimized ONNX-based field detector for Egyptian ID cards.
 
     Uses ONNX Runtime for faster CPU inference compared to PyTorch.
-    Model output: [batch, 21, anchors] where 21 = 4 (bbox) + 1 (objectness) + 16 (classes)
-    Note: Model has 17 classes in metadata but output only has 16 class scores.
-          Class 16 (dob) is not included in the output - model was likely exported with 16 classes.
+    Model output: [batch, 21, anchors] where 21 = 4 (bbox) + 17 (classes)
+    
+    This is the YOLOv8 format WITHOUT separate objectness score.
+    Class scores are direct sigmoid outputs - use them directly as confidence.
 
     Advantages:
     - Faster inference on CPU (no GPU required)
@@ -44,7 +45,7 @@ class ONNXFieldDetector:
 
     # Field class mapping based on actual ONNX model metadata (17 classes, indices 0-16)
     # These are the exact class names from the model's training configuration
-    # Note: Model output has only 16 class scores (indices 0-15), 'dob' (class 16) is not in output
+    # Note: Model output has 17 class scores matching the 17 metadata classes
     FIELD_CLASSES = {
         0: "first_name",       # first name field
         1: "last_name",        # last name field
@@ -62,7 +63,7 @@ class ONNXFieldDetector:
         13: "face",            # face photo region
         14: "front_logo",      # front logo
         15: "address",         # general address field
-        16: "dob",             # date of birth (metadata only - not in model output)
+        16: "dob",             # date of birth
     }
     
     def __init__(self, model_path: str = "weights/field_detector.onnx"):
@@ -71,7 +72,7 @@ class ONNXFieldDetector:
         self.session = None
         self.input_height = 640
         self.input_width = 640
-        self.num_classes = 16  # Default based on output tensor (21 - 4 box - 1 obj = 16)
+        self.num_classes = 17  # Default: YOLOv8 format (4 box + 17 class = 21)
 
         import os
         if not os.path.exists(model_path):
@@ -102,9 +103,10 @@ class ONNXFieldDetector:
             self.input_name = inputs[0].name
             
             # Determine num_classes from actual output shape
+            # YOLOv8 format: [batch, 4+num_classes, anchors] - NO objectness
             outputs = self.session.get_outputs()
             output_shape = outputs[0].shape
-            self.num_classes = output_shape[1] - 5  # 21 - 5 = 16 classes
+            self.num_classes = output_shape[1] - 4  # 21 - 4 = 17 classes
 
             # Try to load class names from model metadata
             try:
@@ -180,9 +182,9 @@ class ONNXFieldDetector:
         Post-process ONNX model output.
 
         Model output format: [batch, num_values, anchors]
-        where num_values = 4 (box) + 1 (objectness) + num_classes
+        where num_values = 4 (box) + num_classes (YOLOv8 format - NO objectness)
         
-        Use class scores directly for confidence (not objectness × class).
+        Class scores are direct sigmoid outputs - use them directly as confidence.
 
         Args:
             output: Model output [1, num_values, anchors]
@@ -195,20 +197,19 @@ class ONNXFieldDetector:
         """
         # Transpose to [anchors, num_values]
         output = np.transpose(output[0], (1, 0))  # [anchors, num_values]
-        
+
         # Dynamically determine number of classes from output shape
-        # output shape: [anchors, 4 (box) + 1 (obj) + num_classes]
-        num_classes = output.shape[1] - 5  # Subtract 4 box coords + 1 objectness
+        # YOLOv8 format: [anchors, 4 (box) + num_classes] - NO objectness
+        num_classes = output.shape[1] - 4
 
         # Log detailed output statistics
-        max_objectness = float(np.max(output[:, 4]))
-        max_class_score = float(np.max(output[:, 5:5+num_classes]))
-        avg_objectness = float(np.mean(output[:, 4]))
+        max_class_score = float(np.max(output[:, 4:4+num_classes]))
+        avg_class_score = float(np.mean(output[:, 4:4+num_classes]))
 
         # Count high-confidence anchors
-        high_conf_anchors = np.sum(np.max(output[:, 5:5+num_classes], axis=1) > 0.3)
+        high_conf_anchors = np.sum(np.max(output[:, 4:4+num_classes], axis=1) > conf_threshold)
 
-        logger.info(f"ONNX stats: obj_max={max_objectness:.3f}, obj_avg={avg_objectness:.3f}, cls_max={max_class_score:.3f}, high_conf={high_conf_anchors}, num_classes={num_classes}")
+        logger.info(f"ONNX stats: cls_max={max_class_score:.3f}, cls_avg={avg_class_score:.3f}, high_conf={high_conf_anchors}, num_classes={num_classes}")
 
         detections = []
         debug_dets = []
@@ -217,46 +218,42 @@ class ONNXFieldDetector:
             # Extract box coordinates [cx, cy, w, h]
             cx, cy, w, h = anchor[0:4]
 
-            # Extract objectness score (for filtering only)
-            objectness = float(anchor[4])
+            # Extract class scores (starts at index 4 in YOLOv8 format)
+            class_scores = anchor[4:4+num_classes]
 
-            # Extract class scores (dynamically determined)
-            class_scores = anchor[5:5+num_classes]
-            
             # Get best class
             class_id = int(np.argmax(class_scores))
             class_conf = float(class_scores[class_id])
-            
-            # Use class confidence directly (not objectness × class)
-            # Filter out very low objectness to remove background
+
+            # Use class confidence directly (YOLOv8 format - no objectness multiplication)
             conf = class_conf
-            
+
             # Log promising detections for debugging
-            if class_conf > 0.2 and objectness > 0.1:
-                debug_dets.append((i, class_id, objectness, class_conf, conf))
-            
-            # Filter: need both reasonable objectness AND class confidence
-            if objectness < 0.1 or conf < conf_threshold:
+            if conf > conf_threshold:
+                debug_dets.append((i, class_id, conf))
+
+            # Filter by confidence threshold
+            if conf < conf_threshold:
                 continue
-            
+
             # Convert to [x1, y1, x2, y2]
             x1 = cx - w / 2
             y1 = cy - h / 2
             x2 = cx + w / 2
             y2 = cy + h / 2
-            
+
             # Remove padding and scale back to original image
             x1 = (x1 - padding[0]) * scale[0]
             y1 = (y1 - padding[1]) * scale[1]
             x2 = (x2 - padding[0]) * scale[0]
             y2 = (y2 - padding[1]) * scale[1]
-            
+
             # Clip to image bounds
             x1, y1 = max(0, int(x1)), max(0, int(y1))
             x2, y2 = min(10000, int(x2)), min(10000, int(y2))
-            
+
             class_name = self.FIELD_CLASSES.get(class_id, f"class_{class_id}")
-            
+
             detections.append(
                 Detection(
                     bbox=[int(x1), int(y1), int(x2), int(y2)],
@@ -265,19 +262,19 @@ class ONNXFieldDetector:
                     confidence=float(round(conf, 3)),
                 )
             )
-        
+
         # Log debug info
         if debug_dets:
-            logger.info(f"ONNX promising: {[(self.FIELD_CLASSES.get(d[1], f'c{d[1]}'), round(d[2],3), round(d[3],3)) for d in debug_dets[:10]]}")
-        
+            logger.info(f"ONNX promising: {[(self.FIELD_CLASSES.get(d[1], f'c{d[1]}'), round(d[2],3)) for d in debug_dets[:10]]}")
+
         logger.info(f"ONNX pre-NMS: {len(detections)} detections")
-        
+
         # Apply Non-Maximum Suppression (NMS)
         if detections:
             detections = self._apply_nms(detections)
-        
+
         logger.info(f"ONNX post-NMS: {len(detections)} detections")
-        
+
         return detections
     
     def _apply_nms(self, detections: List[Detection], iou_threshold: float = 0.7) -> List[Detection]:
@@ -526,8 +523,9 @@ class EgyptianIDDetector:
         }
         
         # Valid fields we want to extract
-        VALID_FIELDS = {'firstName', 'lastName', 'nid', 'serial', 'address', 
-                       'expiryDate', 'dateOfBirth', 'jobTitle', 'gender', 
+        VALID_FIELDS = {'firstName', 'lastName', 'nid', 'serial', 'address',
+                       'addressLine1', 'addressLine2',  # Address line fields
+                       'expiryDate', 'dateOfBirth', 'jobTitle', 'gender',
                        'religion', 'maritalStatus', 'photo', 'frontLogo'}
 
         # Try ONNX detector first with lower threshold for better recall
