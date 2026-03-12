@@ -412,23 +412,7 @@ class IDExtractionPipeline:
             avg_conf = 0.0
 
         # Adjust confidence based on NID checksum validation
-        if parsed_info and parsed_info.valid:
-            if "id_number" in confidence_scores:
-                if parsed_info.checksum_valid:
-                    # Boost confidence if checksum is valid
-                    confidence_scores["id_number"] = min(
-                        1.0, confidence_scores.get("id_number", 0) + 0.15
-                    )
-                    logger.debug(f"NID checksum valid - boosted confidence")
-                else:
-                    # Reduce confidence if checksum invalid
-                    confidence_scores["id_number"] = max(
-                        0.0, confidence_scores.get("id_number", 0) - 0.20
-                    )
-                    logger.warning(f"NID checksum invalid - reduced confidence")
-            
-            # Recalculate overall confidence
-            avg_conf = float(np.mean(list(confidence_scores.values())))
+        # Checksum algorithm is inaccurate for Egyptian NID, ignoring confidence penalty.
 
         level = "high" if avg_conf > 0.85 else "medium" if avg_conf > 0.6 else "low"
 

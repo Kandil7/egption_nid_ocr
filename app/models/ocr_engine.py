@@ -1,6 +1,7 @@
 """
 OCR Engine for Egyptian ID Card
 EasyOCR-based with light preprocessing.
+Supports multiple OCR engines: EasyOCR, PaddleOCR, PaddleOCR-VL-1.5, Tesseract.
 """
 
 import os
@@ -15,12 +16,22 @@ from typing import Optional, Dict
 from app.core.config import settings
 from app.core.logger import logger
 
+# Try to import PaddleOCR-VL-1.5 engine
+try:
+    from app.models.paddle_vl_engine import PaddleVLEngine
+
+    PADDLE_VL_AVAILABLE = True
+except ImportError:
+    PADDLE_VL_AVAILABLE = False
+    logger.warning("PaddleOCR-VL-1.5 not available")
+
 
 class OCRMode(str, Enum):
     """OCR engine modes."""
 
     EASYOCR = "easyocr"
     PADDLE_AR = "paddle_ar"
+    PADDLE_VL = "paddle_vl"  # PaddleOCR-VL-1.5 VLM-based OCR
     TESSERACT = "tesseract"
 
 
@@ -146,7 +157,6 @@ class PaddleOCREngine:
                 det=False,
                 rec=True,
                 use_gpu=use_gpu,
-                show_log=False,
             )
             if getattr(settings, "PADDLE_AR_REC_MODEL_DIR", ""):
                 ar_kwargs["rec_model_dir"] = settings.PADDLE_AR_REC_MODEL_DIR
@@ -160,7 +170,6 @@ class PaddleOCREngine:
                 rec=True,
                 use_angle_cls=False,
                 use_gpu=use_gpu,
-                show_log=False,
             )
             if getattr(settings, "PADDLE_DIGIT_REC_MODEL_DIR", ""):
                 digit_kwargs["rec_model_dir"] = settings.PADDLE_DIGIT_REC_MODEL_DIR
@@ -198,7 +207,8 @@ class PaddleOCREngine:
             # ocr_out is typically: [[ [box], (text, score) ], ... ]
             if ocr_out and len(ocr_out) > 0 and ocr_out[0] is not None:
                 for line in ocr_out:
-                    if not line: continue
+                    if not line:
+                        continue
                     for box, (txt, score) in line:
                         if txt:
                             texts.append(txt)
@@ -291,19 +301,21 @@ class TesseractEngine:
     def __init__(self):
         """Initialize Tesseract engine."""
         self._client = None
-        
+
         try:
             import pytesseract
-            
+
             # Set custom tessdata directory via environment variable
             tessdata_dir = os.path.abspath(getattr(settings, "TESSDATA_DIR", "./weights"))
-            os.environ['TESSDATA_PREFIX'] = tessdata_dir
-            
+            os.environ["TESSDATA_PREFIX"] = tessdata_dir
+
             # Set Tesseract executable path
             tesseract_path = self._find_tesseract()
             pytesseract.pytesseract.tesseract_cmd = tesseract_path
-            
-            logger.info(f"Tesseract OCR ready - tessdata dir: {tessdata_dir}, tesseract path: {tesseract_path}")
+
+            logger.info(
+                f"Tesseract OCR ready - tessdata dir: {tessdata_dir}, tesseract path: {tesseract_path}"
+            )
             self._client = pytesseract
         except Exception as e:
             logger.warning(f"Could not initialize Tesseract OCR: {e}")
@@ -317,18 +329,18 @@ class TesseractEngine:
             r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
             os.path.expanduser(r"~\AppData\Local\Programs\Tesseract-OCR\tesseract.exe"),
         ]
-        
+
         for path in paths:
             if os.path.exists(path):
                 return path
-        
+
         # Try PATH
         return "tesseract"
 
     def run_digits(self, image_np: np.ndarray) -> OCRResult:
         """
         Run digit recognition on a cropped field image.
-        
+
         Optimized for Egyptian NID using ara_number_id.traineddata
         which specializes in Arabic-Indic and European digit recognition.
         """
@@ -351,7 +363,9 @@ class TesseractEngine:
                 gray = image_np.copy()
 
             # Log image properties for debugging
-            logger.info(f"Tesseract input: shape={gray.shape}, dtype={gray.dtype}, min={gray.min()}, max={gray.max()}")
+            logger.info(
+                f"Tesseract input: shape={gray.shape}, dtype={gray.dtype}, min={gray.min()}, max={gray.max()}"
+            )
 
             # Upscale for better recognition (NID digits are often small)
             h, w = gray.shape
@@ -365,82 +379,86 @@ class TesseractEngine:
             best_text = ""
             best_confidence = 0.0
             best_psm = 7
-            
+
             for psm in [7, 13, 6]:  # 7=single line, 13=raw line, 6=single block
                 config = f"--oem 3 --psm {psm}"
                 text = ""
                 confidence = 0.0
-                
+
                 try:
                     data = self._client.image_to_data(
-                        gray, 
-                        config=config, 
-                        lang='ara_number_id',
-                        output_type=self._client.Output.DICT
+                        gray,
+                        config=config,
+                        lang="ara_number_id",
+                        output_type=self._client.Output.DICT,
                     )
-                    
-                    for i, box_text in enumerate(data['text']):
+
+                    for i, box_text in enumerate(data["text"]):
                         if box_text.strip():
                             text += box_text
-                            conf = float(data['conf'][i])
+                            conf = float(data["conf"][i])
                             confidence = max(confidence, conf)
-                    
+
                     # Normalize Arabic-Indic digits to European immediately
                     arabic_indic = "٠١٢٣٤٥٦٧٨٩"
                     european = "0123456789"
                     translation_table = str.maketrans(arabic_indic, european)
-                    cleaned = re.sub(r'[^0-9٠-٩]', '', text.strip())
+                    cleaned = re.sub(r"[^0-9٠-٩]", "", text.strip())
                     cleaned = cleaned.translate(translation_table)
-                    
-                    logger.info(f"Tesseract psm={psm}: raw='{text}', cleaned='{cleaned}' (len={len(cleaned)}, conf={confidence:.1f}%)")
-                    
+
+                    logger.info(
+                        f"Tesseract psm={psm}: raw='{text}', cleaned='{cleaned}' (len={len(cleaned)}, conf={confidence:.1f}%)"
+                    )
+
                     # Pick best: prefer results closer to 14 digits, then highest confidence
                     # We use a scoring function: confidence minus a penalty for every character away from 14
                     def _score_cand(txt, conf):
-                        if not txt: return -999.0
+                        if not txt:
+                            return -999.0
                         return conf - (abs(len(txt) - 14) * 20.0)
-                        
+
                     current_score = _score_cand(cleaned, confidence)
                     best_score = _score_cand(best_text, best_confidence)
-                    
+
                     if current_score > best_score:
                         best_text = cleaned
                         best_confidence = confidence
                         best_psm = psm
-                        
+
                 except Exception as e:
                     logger.debug(f"Tesseract psm={psm} failed: {e}")
                     continue
-            
+
             # If ara_number_id failed entirely, try eng as fallback
             if not best_text:
                 try:
                     config = "--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789"
                     data = self._client.image_to_data(
-                        gray, 
-                        config=config, 
-                        lang='eng',
-                        output_type=self._client.Output.DICT
+                        gray, config=config, lang="eng", output_type=self._client.Output.DICT
                     )
-                    for i, box_text in enumerate(data['text']):
+                    for i, box_text in enumerate(data["text"]):
                         if box_text.strip():
                             best_text += box_text
-                            conf = float(data['conf'][i])
+                            conf = float(data["conf"][i])
                             best_confidence = max(best_confidence, conf)
-                    best_text = re.sub(r'\D', '', best_text.strip())
-                    logger.info(f"Tesseract eng fallback: '{best_text}' (conf={best_confidence:.1f}%)")
+                    best_text = re.sub(r"\D", "", best_text.strip())
+                    logger.info(
+                        f"Tesseract eng fallback: '{best_text}' (conf={best_confidence:.1f}%)"
+                    )
                 except Exception as e:
                     logger.warning(f"Tesseract eng fallback failed: {e}")
 
             cleaned_text = best_text
             confidence = best_confidence
-            logger.info(f"Tesseract best result (psm={best_psm}): '{cleaned_text}' (len={len(cleaned_text)}, conf={confidence:.1f}%)")
+            logger.info(
+                f"Tesseract best result (psm={best_psm}): '{cleaned_text}' (len={len(cleaned_text)}, conf={confidence:.1f}%)"
+            )
 
             # Calculate confidence based on text length (NID should be 14 digits)
             # and Tesseract's confidence score
             length_score = min(1.0, len(cleaned_text) / 14.0) if cleaned_text else 0.0
             tesseract_conf = confidence / 100.0 if confidence > 0 else 0.0
-            
+
             # Combined confidence: weight Tesseract's confidence higher
             final_confidence = (tesseract_conf * 0.7 + length_score * 0.3) if cleaned_text else 0.0
 
@@ -462,12 +480,13 @@ class TesseractEngine:
 
 class OCREngine:
     """
-    Unified OCR engine using EasyOCR, PaddleOCR, and Tesseract.
+    Unified OCR engine using EasyOCR, PaddleOCR, PaddleOCR-VL-1.5, and Tesseract.
     """
 
     _instance = None
     _easy: Optional[EasyOCREngine] = None
     _paddle: Optional[PaddleOCREngine] = None
+    _paddle_vl: Optional[object] = None  # PaddleOCR-VL-1.5
     _tesseract: Optional[TesseractEngine] = None
 
     def __new__(cls):
@@ -498,6 +517,22 @@ class OCREngine:
             logger.warning(f"Failed to initialize PaddleOCR engine: {e}")
             self._paddle = None
 
+        # Initialize PaddleOCR-VL-1.5 (VLM-based Arabic OCR)
+        if PADDLE_VL_AVAILABLE:
+            try:
+                paddle_vl_engine = PaddleVLEngine()
+                if paddle_vl_engine.available():
+                    self._paddle_vl = paddle_vl_engine
+                    logger.info("PaddleOCR-VL-1.5 initialized successfully")
+                else:
+                    self._paddle_vl = None
+                    logger.warning("PaddleOCR-VL-1.5 pipeline not available")
+            except Exception as e:
+                logger.warning(f"Failed to initialize PaddleOCR-VL-1.5: {e}")
+                self._paddle_vl = None
+        else:
+            self._paddle_vl = None
+
         # Initialize Tesseract (digits fallback)
         try:
             self._tesseract = TesseractEngine()
@@ -517,25 +552,27 @@ class OCREngine:
 
         # Ensure all strings are 14 digits by padding or truncating if necessary
         # Usually they are already filtered to 14, but just in case
-        padded_results = [r[:14].ljust(14, '0') for r in results]
-        
+        padded_results = [r[:14].ljust(14, "0") for r in results]
+
         voted = []
         for i in range(14):
             chars_at_i = [r[i] for r in padded_results]
             # Get most common character
             most_common = max(set(chars_at_i), key=chars_at_i.count)
             voted.append(most_common)
-            
+
         return "".join(voted)
 
-    def ocr_field(self, image: np.ndarray, field_name: str, raw_image: Optional[np.ndarray] = None) -> OCRResult:
+    def ocr_field(
+        self, image: np.ndarray, field_name: str, raw_image: Optional[np.ndarray] = None
+    ) -> OCRResult:
         """
         Run OCR on a field with optimized engine routing.
 
         Strategy:
           - NID fields: Multi-engine voting (Tesseract + EasyOCR + Paddle)
           - Other digit fields: Paddle digits → Tesseract → EasyOCR
-          - Arabic text fields: PaddleOCR Arabic → EasyOCR
+          - Arabic text fields: PaddleOCR-VL-1.5 → PaddleOCR Arabic → EasyOCR
           - Other fields: EasyOCR default
 
         Note: ara_number_id.traineddata is specifically trained for Arabic number
@@ -547,36 +584,54 @@ class OCREngine:
         # Other digit fields (serial, codes, etc.)
         digit_fields = {"serial", "serial_num", "issue_code"}
 
-        # Arabic text fields
-        arabic_fields = {"firstName", "lastName", "name_ar", "address", "add_line_1", "add_line_2", "nationality"}
+        # Arabic text fields - PRIMARY use case for PaddleOCR-VL-1.5
+        arabic_fields = {
+            "firstName",
+            "lastName",
+            "name_ar",
+            "address",
+            "add_line_1",
+            "add_line_2",
+            "nationality",
+            "addressLine1",
+            "addressLine2",
+        }
 
         # NID fields - use multi-engine approach
         if field_name in nid_fields:
             logger.info(f"NID OCR: Starting multi-engine extraction for '{field_name}'")
             t0 = time.time()
             results = []
-            
+
             # 1. Tesseract with ara_number_id (best for clean digits)
             if self._tesseract and self._tesseract._client is not None:
                 tesseract_result = self._tesseract.run_digits(image)
                 if tesseract_result.text:
-                    results.append(("tesseract", tesseract_result.text, tesseract_result.confidence))
-                    logger.info(f"NID OCR: Tesseract result='{tesseract_result.text}' (len={len(tesseract_result.text)}, conf={tesseract_result.confidence:.2f})")
-            
+                    results.append(
+                        ("tesseract", tesseract_result.text, tesseract_result.confidence)
+                    )
+                    logger.info(
+                        f"NID OCR: Tesseract result='{tesseract_result.text}' (len={len(tesseract_result.text)}, conf={tesseract_result.confidence:.2f})"
+                    )
+
             # 2. EasyOCR with digits_only (good fallback)
             if self._easy and not any(len(r[1]) >= 14 for r in results):
                 easy_result = self._easy.run(image, digits_only=True)
                 if easy_result.text:
                     results.append(("easyocr", easy_result.text, easy_result.confidence))
-                    logger.info(f"NID OCR: EasyOCR result='{easy_result.text}' (len={len(easy_result.text)}, conf={easy_result.confidence:.2f})")
-            
+                    logger.info(
+                        f"NID OCR: EasyOCR result='{easy_result.text}' (len={len(easy_result.text)}, conf={easy_result.confidence:.2f})"
+                    )
+
             # 3. PaddleOCR digits (if available)
             if self._paddle and self._paddle._digit_reader is not None:
                 paddle_result = self._paddle.run_digits(image)
                 if paddle_result.text:
                     results.append(("paddle", paddle_result.text, paddle_result.confidence))
-                    logger.info(f"NID OCR: PaddleOCR result='{paddle_result.text}' (len={len(paddle_result.text)}, conf={paddle_result.confidence:.2f})")
-            
+                    logger.info(
+                        f"NID OCR: PaddleOCR result='{paddle_result.text}' (len={len(paddle_result.text)}, conf={paddle_result.confidence:.2f})"
+                    )
+
             # Select best result
             if results:
                 # Prefer 14-digit results
@@ -589,52 +644,142 @@ class OCREngine:
                             engine_used=getattr(OCRMode, engine.upper(), OCRMode.EASYOCR),
                             latency_ms=int((time.time() - t0) * 1000),
                         )
-                
-                # If no 14-digit result, use highest confidence
+
+                # If no 14-digit result, try to fix 13-digit results
+                for engine, text, conf in results:
+                    if len(text) == 13:
+                        # Try to recover the missing digit
+                        try:
+                            from app.models.id_parser import validate_nid_checksum
+
+                            for digit in "0123456789":
+                                candidate = text + digit
+                                if validate_nid_checksum(candidate):
+                                    logger.info(
+                                        f"NID OCR: Recovered 14-digit from 13-digit using {engine}: {candidate}"
+                                    )
+                                    return OCRResult(
+                                        text=candidate,
+                                        confidence=conf,
+                                        engine_used=getattr(
+                                            OCRMode, engine.upper(), OCRMode.EASYOCR
+                                        ),
+                                        latency_ms=int((time.time() - t0) * 1000),
+                                    )
+                            # If no valid checksum, use '0' as fallback
+                            candidate = text + "0"
+                            logger.info(f"NID OCR: Using fallback '0' for 13-digit: {candidate}")
+                            return OCRResult(
+                                text=candidate,
+                                confidence=conf,
+                                engine_used=getattr(OCRMode, engine.upper(), OCRMode.EASYOCR),
+                                latency_ms=int((time.time() - t0) * 1000),
+                            )
+                        except ImportError:
+                            # No validation available, just pad with '0'
+                            candidate = text + "0"
+                            logger.info(f"NID OCR: Padding 13-digit with '0': {candidate}")
+                            return OCRResult(
+                                text=candidate,
+                                confidence=conf,
+                                engine_used=getattr(OCRMode, engine.upper(), OCRMode.EASYOCR),
+                                latency_ms=int((time.time() - t0) * 1000),
+                            )
+
+                # If no 14-digit or 13-digit result, use highest confidence
                 best = max(results, key=lambda x: (len(x[1]), x[2]))
-                logger.info(f"NID OCR: Selected {best[0]} result (best confidence): '{best[1]}' (len={len(best[1])})")
+                logger.info(
+                    f"NID OCR: Selected {best[0]} result (best confidence): '{best[1]}' (len={len(best[1])})"
+                )
+                # Pad if needed
+                if len(best[1]) == 13:
+                    padded = best[1] + "0"
+                    logger.info(f"NID OCR: Padding to 14 digits: {padded}")
+                    return OCRResult(
+                        text=padded,
+                        confidence=best[2],
+                        engine_used=getattr(OCRMode, best[0].upper(), OCRMode.EASYOCR),
+                        latency_ms=int((time.time() - t0) * 1000),
+                    )
                 return OCRResult(
                     text=best[1],
                     confidence=best[2],
                     engine_used=getattr(OCRMode, best[0].upper(), OCRMode.EASYOCR),
                     latency_ms=int((time.time() - t0) * 1000),
                 )
-            
+
             logger.warning(f"NID OCR: All engines failed to extract digits")
-            return OCRResult(text="", confidence=0.0, engine_used=OCRMode.EASYOCR, latency_ms=int((time.time() - t0) * 1000))
+            return OCRResult(
+                text="",
+                confidence=0.0,
+                engine_used=OCRMode.EASYOCR,
+                latency_ms=int((time.time() - t0) * 1000),
+            )
 
         # Other digit-only fields
         if field_name in digit_fields:
             logger.debug(f"OCR field '{field_name}' - digit field")
-            
+
             # 1. Paddle digit recognizer
             if self._paddle and self._paddle._digit_reader is not None:
                 paddle_result = self._paddle.run_digits(image)
                 if paddle_result.text and len(paddle_result.text) > 0:
                     return paddle_result
-            
+
             # 2. Tesseract with ara_number_id
             if self._tesseract and self._tesseract._client is not None:
                 tesseract_result = self._tesseract.run_digits(image)
                 if tesseract_result.text:
                     return tesseract_result
-            
+
             # 3. EasyOCR fallback
             if self._easy:
                 return self._easy.run(image, digits_only=True)
-            
+
             return OCRResult(text="", confidence=0.0, engine_used=OCRMode.EASYOCR, latency_ms=0)
 
-        # Arabic / mixed-name/address fields → PaddleOCR Arabic first
-        if field_name in arabic_fields and self._paddle and self._paddle.available():
-            paddle_result = self._paddle.run_arabic(image)
-            # If Paddle returns something with non-zero confidence, use it
-            if paddle_result.text and paddle_result.confidence > 0:
-                return paddle_result
+        # Arabic / mixed-name/address fields → PaddleOCR-VL-1.5 first (VLM-based)
+        if field_name in arabic_fields:
+            # 1. Try PaddleOCR-VL-1.5 (VLM - better for Arabic context)
+            if (
+                self._paddle_vl
+                and hasattr(self._paddle_vl, "available")
+                and self._paddle_vl.available()
+            ):
+                logger.debug(f"Arabic field '{field_name}': trying PaddleOCR-VL-1.5")
+                vl_result = self._paddle_vl.run_arabic(image)
+                # Lower threshold to 0.3 for Arabic to get more results
+                if vl_result.text and vl_result.confidence > 0.3:
+                    logger.info(
+                        f"Arabic field '{field_name}': PaddleOCR-VL-1.5 succeeded: '{vl_result.text[:50]}...'"
+                    )
+                    return OCRResult(
+                        text=vl_result.text,
+                        confidence=vl_result.confidence,
+                        engine_used=OCRMode.PADDLE_VL,
+                        latency_ms=vl_result.latency_ms,
+                    )
+                else:
+                    logger.debug(
+                        f"Arabic field '{field_name}': PaddleOCR-VL-1.5 returned low confidence"
+                    )
+
+            # 2. Fallback to PaddleOCR Arabic (CRNN-based) - lower threshold
+            if self._paddle and self._paddle.available():
+                logger.debug(f"Arabic field '{field_name}': trying PaddleOCR Arabic")
+                paddle_result = self._paddle.run_arabic(image)
+                # Lower threshold for PaddleOCR Arabic
+                if paddle_result.text and paddle_result.confidence > 0.3:
+                    return paddle_result
 
         # Fallback / default path → EasyOCR without digit-only restriction
+        # Lower confidence threshold to 0.3 for better recall
         if self._easy:
-            return self._easy.run(image, digits_only=False)
+            result = self._easy.run(image, digits_only=False)
+            # If confidence is low but we have text, still return it
+            if result.text and result.confidence < 0.3:
+                result.confidence = 0.3  # Set minimum confidence
+            return result
 
         return OCRResult(text="", confidence=0.0, engine_used=OCRMode.EASYOCR, latency_ms=0)
 
@@ -644,5 +789,7 @@ class OCREngine:
             "easyocr": self._easy is not None and self._easy.reader is not None,
             "paddle_ar": self._paddle is not None and self._paddle._ar_reader is not None,
             "paddle_digits": self._paddle is not None and self._paddle._digit_reader is not None,
+            "paddle_vl": self._paddle_vl is not None
+            and (hasattr(self._paddle_vl, "available") and self._paddle_vl.available()),
             "tesseract": self._tesseract is not None and self._tesseract._client is not None,
         }
