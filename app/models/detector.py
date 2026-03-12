@@ -366,8 +366,15 @@ class YOLODetector:
 
             self.model = YOLO(model_path)
             # Get class names from the model itself
-            self.class_names = self.model.names
-            logger.info(f"Loaded YOLO model: {model_path} with {len(self.class_names)} classes")
+            # Ultralytics stores class names in model.names dict
+            if hasattr(self.model, 'names') and self.model.names:
+                self.class_names = self.model.names
+                logger.info(f"Loaded YOLO model: {model_path} with {len(self.class_names)} classes")
+                # Log first few class names for debugging
+                sample_classes = {k: v for k, v in list(self.class_names.items())[:5]}
+                logger.info(f"Sample class names: {sample_classes}")
+            else:
+                logger.warning(f"Model has no class names, using empty dict")
         except Exception as e:
             logger.error(f"Failed to load YOLO model: {e}")
 
@@ -452,8 +459,34 @@ class EgyptianIDDetector:
         """Detect and crop the ID card from the full image."""
         detections = self.card_detector.detect(image)
 
-        # Find card detections (typically class 0 = card)
-        card_dets = [d for d in detections if d.class_name == "id_card" or d.class_id == 0]
+        # Find card detections - accept multiple possible class names
+        # The detect_id_card.pt model may have classes like: id_card, card, id, national_id, 
+        # front, back, front_side, back_side, back-up, etc.
+        CARD_CLASS_NAMES = {
+            "id_card", "card", "id", "national_id", 
+            "front", "back", "front_side", "back_side", 
+            "back-up", "front_up", "back_up", "front_down", "back_down"
+        }
+        
+        # First try to find front-side card detections (prefer front over back)
+        card_dets = [
+            d for d in detections
+            if d.class_name in ("id_card", "card", "id", "national_id", "front", "front_side", "front_up", "front_down")
+        ]
+        
+        # If no front detection, accept any card-related class
+        if not card_dets:
+            card_dets = [
+                d for d in detections
+                if d.class_name in CARD_CLASS_NAMES or d.class_id == 0
+            ]
+
+        # If no card found but we have other detections, use the highest confidence detection
+        # This handles cases where the model uses different class naming
+        if not card_dets and detections:
+            logger.warning(f"No card detection found, using best available: {detections[0].class_name}")
+            best = max(detections, key=lambda d: d.confidence)
+            card_dets = [best]
 
         if not card_dets:
             logger.warning("No card detected, using full image")
@@ -504,29 +537,37 @@ class EgyptianIDDetector:
             'front_logo': 'frontLogo',
             'address': 'address',
         }
-        
+
         # YOLO (detect_odjects.pt) to canonical mapping
+        # Based on NASO7Y model classes from config.py:
+        # 0: "address", 1: "demo", 2: "dob", 3: "expiry", 4: "firstName",
+        # 5: "front_logo", 24: "lastName", 25: "nid", 26: "nid_back",
+        # 27: "photo", 28: "poe", 29: "serial", 30: "watermark_tut"
         YOLO_TO_CANONICAL = {
+            'address': 'address',
             'firstName': 'firstName',
             'lastName': 'lastName',
             'nid': 'nid',
             'nid_back': 'nid_back',
             'serial': 'serial',
-            'issue': 'serial',  # Issue is part of serial
             'expiry': 'expiryDate',
             'dob': 'dateOfBirth',
-            'job': 'jobTitle',
             'photo': 'photo',
             'front_logo': 'frontLogo',
-            'address': 'address',
             'poe': 'address',  # Place of employment -> address
+            'demo': 'demo',
+            'watermark_tut': 'watermark_tut',
         }
         
         # Valid fields we want to extract
-        VALID_FIELDS = {'firstName', 'lastName', 'nid', 'serial', 'address',
-                       'addressLine1', 'addressLine2',  # Address line fields
-                       'expiryDate', 'dateOfBirth', 'jobTitle', 'gender',
-                       'religion', 'maritalStatus', 'photo', 'frontLogo'}
+        VALID_FIELDS = {
+            'firstName', 'lastName', 'nid', 'serial', 'address',
+            'addressLine1', 'addressLine2',  # Address line fields
+            'expiryDate', 'dateOfBirth', 'jobTitle', 'gender',
+            'religion', 'maritalStatus', 'photo', 'frontLogo',
+            # Additional NASO7Y model classes
+            'nid_back', 'demo', 'poe',
+        }
 
         # Try ONNX detector first with lower threshold for better recall
         if self.field_detector_onnx.session is not None:

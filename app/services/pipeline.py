@@ -240,20 +240,22 @@ class IDExtractionPipeline:
         confidence_scores = {}
 
         # Fields we actually OCR to reduce runtime
+        # Include all fields that the ONNX/YOLO detector can find
         ocr_fields = {
-            "nid",
-            "id_number",
-            "front_nid",
-            "back_nid",
-            "firstName",
-            "lastName",
-            "address",
-            "addressLine1",
-            "addressLine2",
-            "serial",
-            "serial_num",
-            "issue_date",
-            "expiry_date",
+            # ID numbers
+            "nid", "id_number", "front_nid", "back_nid", "nid_back",
+            # Names
+            "firstName", "lastName",
+            # Address
+            "address", "addressLine1", "addressLine2",
+            # Serial and issue
+            "serial", "serial_num", "issue_date", "issue_code",
+            # Dates
+            "expiry_date", "expiryDate", "dateOfBirth", "dob",
+            # Personal info
+            "jobTitle", "job_title", "gender", "religion", "maritalStatus", "marital_status",
+            # Other
+            "photo", "face", "frontLogo", "front_logo", "poe", "demo",
         }
 
         # Filter to essential fields
@@ -277,6 +279,13 @@ class IDExtractionPipeline:
             field_name, text, conf = future.result()
             extracted[field_name] = text
             confidence_scores[field_name] = conf
+
+        # Also include any detected fields that weren't OCR'd (with empty text)
+        # This ensures all field_detections have a corresponding entry in extracted
+        for field_name, (field_img, det_conf) in yolo_fields.items():
+            if field_name not in extracted:
+                extracted[field_name] = ""
+                confidence_scores[field_name] = det_conf
 
         return extracted, confidence_scores
 
@@ -315,8 +324,39 @@ class IDExtractionPipeline:
 
         # 4. Detect fields (if detector available)
         yolo_fields = {}
+        field_detections_list = []  # Store raw detections for response
+        
         if self._detector:
             try:
+                # Get raw field detections with bounding boxes
+                if self._detector.field_detector_onnx.session is not None:
+                    raw_detections = self._detector.field_detector_onnx.detect(card_image, conf_threshold=0.18)
+                    field_detections_list = [
+                        {
+                            "class_id": d.class_id,
+                            "class_name": d.class_name,
+                            "confidence": d.confidence,
+                            "bbox": d.bbox,
+                        }
+                        for d in raw_detections
+                    ]
+                    logger.info(f"Pipeline: ONNX detected {len(field_detections_list)} fields")
+                
+                # Fallback to YOLO if ONNX found nothing
+                if not field_detections_list and self._detector.field_detector_yolo.model is not None:
+                    raw_detections = self._detector.field_detector_yolo.detect(card_image, conf_threshold=0.25)
+                    field_detections_list = [
+                        {
+                            "class_id": d.class_id,
+                            "class_name": d.class_name,
+                            "confidence": d.confidence,
+                            "bbox": d.bbox,
+                        }
+                        for d in raw_detections
+                    ]
+                    logger.info(f"Pipeline: YOLO detected {len(field_detections_list)} fields")
+                
+                # Get cropped fields for OCR
                 yolo_fields = self._detector.crop_fields(card_image)
             except Exception as e:
                 logger.warning(f"Field detection failed: {e}")
@@ -426,6 +466,7 @@ class IDExtractionPipeline:
                 "level": level,
                 "per_field": confidence_scores,
             },
+            "field_detections": field_detections_list,  # Include all detected fields
             "processing_ms": processing_ms,
         }
 

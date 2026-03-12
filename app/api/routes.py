@@ -83,7 +83,7 @@ async def visualize_fields(file: UploadFile = File(...)):
 
         # Detect fields using ONNX detector directly to get bounding boxes
         field_dets = []
-        
+
         # Try ONNX detector first
         if detector.field_detector_onnx.session is not None:
             try:
@@ -91,26 +91,35 @@ async def visualize_fields(file: UploadFile = File(...)):
                 logger.info(f"Visualize: ONNX detected {len(field_dets)} fields")
             except Exception as e:
                 logger.warning(f"ONNX detection failed in visualize: {e}")
-        
+
         # Fallback to YOLO if ONNX found nothing
         if not field_dets and detector.field_detector_yolo.model is not None:
             field_dets = detector.field_detector_yolo.detect(card_img)
             logger.info(f"Visualize: YOLO detected {len(field_dets)} fields")
-        
+
         # If still no detections, use crop_fields as last resort
         if not field_dets:
             fields_dict = detector.crop_fields(card_img)
             from app.models.detector import Detection
+            # Create reverse mapping from canonical name to class_id
+            CANONICAL_TO_ID = {
+                'firstName': 0, 'lastName': 1, 'addressLine1': 2, 'addressLine2': 3,
+                'nid': 4, 'nid_back': 5, 'serial': 6, 'expiryDate': 8,
+                'dateOfBirth': 16, 'jobTitle': 9, 'gender': 10, 'religion': 11,
+                'maritalStatus': 12, 'photo': 13, 'frontLogo': 14, 'address': 15,
+            }
             for class_name, (crop_img, conf) in fields_dict.items():
                 h, w = crop_img.shape[:2]
+                class_id = CANONICAL_TO_ID.get(class_name, 0)
                 field_dets.append(
                     Detection(
                         bbox=[0, 0, w, h],
-                        class_id=0,
+                        class_id=class_id,
                         class_name=class_name,
                         confidence=float(conf),
                     )
                 )
+            logger.info(f"Visualize: Using crop_fields fallback with {len(field_dets)} fields")
 
         # Color for each class
         colors = {
@@ -131,9 +140,13 @@ async def visualize_fields(file: UploadFile = File(...)):
             label = f"{det.class_name} ({det.confidence:.2f})"
             cv2.putText(card_img, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
 
-        # Combine
+        # Combine - ensure both images have same height
         h, w = result_image.shape[:2]
-        card_img = cv2.resize(card_img, (w, int(card_img.shape[0] * w / card_img.shape[1])))
+        card_h, card_w = card_img.shape[:2]
+        # Resize card to match result_image height, then scale width proportionally
+        scale = h / card_h
+        new_card_w = int(card_w * scale)
+        card_img = cv2.resize(card_img, (new_card_w, h))
         combined = np.hstack([result_image, card_img])
 
         cv2.putText(combined, "Original", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
@@ -183,23 +196,46 @@ async def debug_detection(file: UploadFile = File(...)):
         # Get all detections
         card_dets = detector.card_detector.detect(image)
 
-        # Crop card first, then use crop_fields to get field detections
+        # Crop card first, then detect fields
         card_img = detector.crop_card(image)
-        fields_dict = detector.crop_fields(card_img)
         
-        # Convert to detection list
-        from app.models.detector import Detection
+        # Get actual field detections from ONNX detector (has correct class_id)
         field_dets = []
-        for class_name, (crop_img, conf) in fields_dict.items():
-            h, w = crop_img.shape[:2]
-            field_dets.append(
-                Detection(
-                    bbox=[0, 0, w, h],
-                    class_id=0,
-                    class_name=class_name,
-                    confidence=float(conf),  # Convert numpy float to Python float
+        if detector.field_detector_onnx.session is not None:
+            try:
+                field_dets = detector.field_detector_onnx.detect(card_img, conf_threshold=0.18)
+                logger.info(f"Debug: ONNX detected {len(field_dets)} fields")
+            except Exception as e:
+                logger.warning(f"ONNX detection failed in debug: {e}")
+        
+        # Fallback to YOLO if ONNX found nothing
+        if not field_dets and detector.field_detector_yolo.model is not None:
+            field_dets = detector.field_detector_yolo.detect(card_img, conf_threshold=0.25)
+            logger.info(f"Debug: YOLO detected {len(field_dets)} fields")
+        
+        # Last resort: use crop_fields fallback (class_id will be approximate)
+        if not field_dets:
+            fields_dict = detector.crop_fields(card_img)
+            from app.models.detector import Detection
+            # Create reverse mapping from canonical name to class_id
+            CANONICAL_TO_ID = {
+                'firstName': 0, 'lastName': 1, 'addressLine1': 2, 'addressLine2': 3,
+                'nid': 4, 'nid_back': 5, 'serial': 6, 'expiryDate': 8,
+                'dateOfBirth': 16, 'jobTitle': 9, 'gender': 10, 'religion': 11,
+                'maritalStatus': 12, 'photo': 13, 'frontLogo': 14, 'address': 15,
+            }
+            for class_name, (crop_img, conf) in fields_dict.items():
+                h, w = crop_img.shape[:2]
+                class_id = CANONICAL_TO_ID.get(class_name, 0)
+                field_dets.append(
+                    Detection(
+                        bbox=[0, 0, w, h],
+                        class_id=class_id,
+                        class_name=class_name,
+                        confidence=float(conf),
+                    )
                 )
-            )
+            logger.info(f"Debug: Using crop_fields fallback with {len(field_dets)} fields")
 
         # Get model class names from detector
         class_names = detector.get_field_class_names()
