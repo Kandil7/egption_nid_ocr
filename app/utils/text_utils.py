@@ -5,7 +5,7 @@ Cleans and normalizes OCR output based on field type.
 
 import re
 import unicodedata
-from typing import List
+from typing import List, Dict, Tuple
 
 
 # Arabic Unicode ranges for text cleaning
@@ -217,6 +217,22 @@ def clean_field(text: str, field_type: str) -> str:
         # Apply Arabic normalization for consistency
         text = normalize_arabic_text(text)
 
+        # Fix common OCR mistakes in common Arabic names
+        word_fixes = {
+            "محموا": "محمود",
+            "عبدالله": "عبد الله",
+            "ابراهيم": "إبراهيم",
+            "احمد": "أحمد",
+        }
+        words = text.split()
+        for i, w in enumerate(words):
+            if w in word_fixes:
+                words[i] = word_fixes[w]
+        text = " ".join(words)
+        
+        # Also catch occurrences where they might be joined
+        text = text.replace("عبدالله", "عبد الله")
+
     # English text
     elif field_type in ["serial", "job_title"]:
         text = re.sub(r"[^A-Za-z\s]", "", text).strip().upper()
@@ -262,3 +278,96 @@ def format_name(first_name: str, last_name: str) -> str:
     if last_name:
         parts.append(last_name.strip())
     return " ".join(parts) if parts else ""
+
+def sort_blocks_by_reading_direction(blocks: List[Dict]) -> Tuple[str, float]:
+    """
+    Sort OCR text blocks based on reading direction (RTL for Arabic, LTR otherwise).
+    Auto-detects RTL if any block contains Arabic characters.
+    
+    Args:
+        blocks: List of dicts, each with 'bbox' (coordinates), 'text', 'confidence'
+        
+    Returns:
+        Tuple of (combined_text, average_confidence)
+    """
+    if not blocks:
+        return "", 0.0
+
+    import re
+    # Auto-detect RTL if any block contains Arabic characters
+    is_rtl = False
+    for b in blocks:
+        if re.search(r'[\u0600-\u06FF]', b.get("text", "")):
+            is_rtl = True
+            break
+            
+    enhanced = []
+    for idx, b in enumerate(blocks):
+        bbox = b.get("bbox", [])
+        if not bbox or len(bbox) < 4:
+            # Fallback for missing/invalid bbox
+            enhanced.append((99999, 99999, 0, 0, idx, b))
+            continue
+            
+        # Parse coordinates
+        if len(bbox) == 4 and isinstance(bbox[0], (int, float)):
+            # [x1, y1, x2, y2] format
+            x_coords = [bbox[0], bbox[2]]
+            y_coords = [bbox[1], bbox[3]]
+        else:
+            # [[x1, y1], [x2, y2], [x3, y3], [x4, y4]] format
+            x_coords = [float(p[0]) for p in bbox]
+            y_coords = [float(p[1]) for p in bbox]
+            
+        y_min = min(y_coords)
+        y_max = max(y_coords)
+        x_min = min(x_coords)
+        x_max = max(x_coords)
+        
+        enhanced.append((y_min, y_max, x_max, x_min, idx, b))
+        
+    # Sort top-to-bottom by y_min
+    enhanced.sort(key=lambda x: x[0])
+    
+    lines = []
+    current_line = []
+    current_y_max = None
+    
+    for item in enhanced:
+        y_min, y_max, x_max, x_min, idx, b = item
+        if current_y_max is None:
+            current_y_max = y_max
+            current_line.append(item)
+        elif y_min < current_y_max:  # Overlaps vertically -> same line
+            current_line.append(item)
+            current_y_max = max(current_y_max, y_max)
+        else:
+            lines.append(current_line)
+            current_line = [item]
+            current_y_max = y_max
+            
+    if current_line:
+        lines.append(current_line)
+        
+    final_texts = []
+    confs = []
+    
+    for line in lines:
+        if is_rtl:
+            # Sort Right-to-Left (descending x_max)
+            line.sort(key=lambda x: x[2], reverse=True)
+        else:
+            # Sort Left-to-Right (ascending x_min)
+            line.sort(key=lambda x: x[3])
+            
+        for *_, b in line:
+            txt = str(b.get("text", "")).strip()
+            if txt:
+                final_texts.append(txt)
+            if b.get("confidence") is not None:
+                confs.append(float(b["confidence"]))
+                
+    combined_text = " ".join(final_texts)
+    avg_conf = sum(confs) / len(confs) if confs else 0.0
+    
+    return combined_text, float(avg_conf)

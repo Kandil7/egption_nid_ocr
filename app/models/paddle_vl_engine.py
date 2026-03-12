@@ -163,9 +163,7 @@ class PaddleVLEngine:
             result = self._pipeline.predict(image_rgb)
 
             # Parse result
-            texts = []
             blocks = []
-            confs = []
 
             # PaddleOCR-VL returns a list of result items
             if result and isinstance(result, list):
@@ -176,8 +174,6 @@ class PaddleVLEngine:
                         bbox = item.get("bbox", [])
 
                         if text and isinstance(text, str) and text.strip():
-                            texts.append(text.strip())
-                            confs.append(float(score))
                             blocks.append(
                                 {
                                     "text": text.strip(),
@@ -186,8 +182,8 @@ class PaddleVLEngine:
                                 }
                             )
 
-            full_text = " ".join(texts)
-            avg_conf = float(np.mean(confs)) if confs else 0.0
+            from app.utils.text_utils import sort_blocks_by_reading_direction
+            full_text, avg_conf = sort_blocks_by_reading_direction(blocks)
 
             return PaddleVLResult(
                 text=full_text,

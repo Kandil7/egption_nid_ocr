@@ -106,16 +106,14 @@ class EasyOCREngine:
                     latency_ms=int((time.time() - t0) * 1000),
                 )
 
-            # Extract text and confidence
-            texts = []
-            confs = []
+            # Extract text and confidence with RTL awareness
+            from app.utils.text_utils import sort_blocks_by_reading_direction
+            blocks = []
             for r in results:
                 if len(r) >= 3:
-                    texts.append(r[1])
-                    confs.append(r[2])
-
-            text = " ".join(texts)
-            conf = float(np.mean(confs)) if confs else 0.0
+                    blocks.append({"bbox": r[0], "text": r[1], "confidence": r[2]})
+                    
+            text, conf = sort_blocks_by_reading_direction(blocks)
 
             return OCRResult(
                 text=text,
@@ -201,21 +199,18 @@ class PaddleOCREngine:
             # We disable detection (det=False in constructor) and let it only run recognition.
             ocr_out = self._ar_reader.ocr(image_np, cls=False)
 
-            texts = []
-            confs = []
-
-            # ocr_out is typically: [[ [box], (text, score) ], ... ]
+            # Extract text and confidence with RTL awareness
+            blocks = []
             if ocr_out and len(ocr_out) > 0 and ocr_out[0] is not None:
                 for line in ocr_out:
                     if not line:
                         continue
                     for box, (txt, score) in line:
                         if txt:
-                            texts.append(txt)
-                            confs.append(float(score))
-
-            text = " ".join(texts)
-            conf = float(np.mean(confs)) if confs else 0.0
+                            blocks.append({"bbox": box, "text": txt, "confidence": score})
+                            
+            from app.utils.text_utils import sort_blocks_by_reading_direction
+            text, conf = sort_blocks_by_reading_direction(blocks)
 
             return OCRResult(
                 text=text,
@@ -256,8 +251,7 @@ class PaddleOCREngine:
                     latency_ms=int((time.time() - t0) * 1000),
                 )
 
-            texts = []
-            confs = []
+            blocks = []
             for line in ocr_out:
                 if not line:
                     continue
@@ -270,11 +264,10 @@ class PaddleOCREngine:
                         continue
                     txt, score = result[0], result[1]
                     if txt:
-                        texts.append(txt)
-                        confs.append(float(score))
-
-            text = " ".join(texts)
-            conf = float(np.mean(confs)) if confs else 0.0
+                        blocks.append({"bbox": box, "text": txt, "confidence": score})
+            
+            from app.utils.text_utils import sort_blocks_by_reading_direction
+            text, conf = sort_blocks_by_reading_direction(blocks)
 
             return OCRResult(
                 text=text,
