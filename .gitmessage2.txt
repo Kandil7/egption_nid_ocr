@@ -1,0 +1,7 @@
+feat: remove front_logo and photo fields from OCR
+
+- Remove front_logo from NASO7Y_CLASSES config
+- Remove photo/face from field detection mappings
+- Remove face ROI from image_utils
+- Simplify OCR pipeline (13 fields instead of 15)
+- Update VALID_FIELDS and CANONICAL_TO_ID mappings
