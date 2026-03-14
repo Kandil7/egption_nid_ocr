@@ -62,7 +62,7 @@ RUN pip install --upgrade pip setuptools wheel && \
 COPY app/ ./app/
 COPY scripts/ ./scripts/
 COPY weights/ ./weights/
-COPY models_cache/ ./models_cache/
+# COPY models_cache/ ./models_cache/  # Skip - directory doesn't exist locally
 COPY PP-OCRv5_ar/ ./PP-OCRv5_ar/ 2>/dev/null || true
 
 # Copy environment file
