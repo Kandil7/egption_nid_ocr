@@ -1,7 +1,0 @@
-feat: PaddleOCR v5 optimization for Arabic names
-
-- Remove unsupported show_log argument (PaddleOCR 3.x)
-- Add model verification and logging
-- Add PP-OCRv5 usage documentation
-- Add verification scripts
-- Expected accuracy: 81.27% for Arabic text
