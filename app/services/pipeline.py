@@ -240,20 +240,22 @@ class IDExtractionPipeline:
         confidence_scores = {}
 
         # Fields we actually OCR to reduce runtime
+        # Include all fields that the ONNX/YOLO detector can find
         ocr_fields = {
-            "nid",
-            "id_number",
-            "front_nid",
-            "back_nid",
-            "firstName",
-            "lastName",
-            "address",
-            "add_line_1",
-            "add_line_2",
-            "serial",
-            "serial_num",
-            "issue_date",
-            "expiry_date",
+            # ID numbers
+            "nid", "id_number", "front_nid", "back_nid", "nid_back",
+            # Names
+            "firstName", "lastName",
+            # Address
+            "address", "addressLine1", "addressLine2",
+            # Serial and issue
+            "serial", "serial_num", "issue_date", "issue_code",
+            # Dates
+            "expiry_date", "expiryDate", "dateOfBirth", "dob",
+            # Personal info
+            "jobTitle", "job_title", "gender", "religion", "maritalStatus", "marital_status",
+            # Other
+            "photo", "face", "frontLogo", "front_logo", "poe", "demo",
         }
 
         # Filter to essential fields
@@ -277,6 +279,13 @@ class IDExtractionPipeline:
             field_name, text, conf = future.result()
             extracted[field_name] = text
             confidence_scores[field_name] = conf
+
+        # Also include any detected fields that weren't OCR'd (with empty text)
+        # This ensures all field_detections have a corresponding entry in extracted
+        for field_name, (field_img, det_conf) in yolo_fields.items():
+            if field_name not in extracted:
+                extracted[field_name] = ""
+                confidence_scores[field_name] = det_conf
 
         return extracted, confidence_scores
 
@@ -315,8 +324,39 @@ class IDExtractionPipeline:
 
         # 4. Detect fields (if detector available)
         yolo_fields = {}
+        field_detections_list = []  # Store raw detections for response
+        
         if self._detector:
             try:
+                # Get raw field detections with bounding boxes
+                if self._detector.field_detector_onnx.session is not None:
+                    raw_detections = self._detector.field_detector_onnx.detect(card_image, conf_threshold=0.18)
+                    field_detections_list = [
+                        {
+                            "class_id": d.class_id,
+                            "class_name": d.class_name,
+                            "confidence": d.confidence,
+                            "bbox": d.bbox,
+                        }
+                        for d in raw_detections
+                    ]
+                    logger.info(f"Pipeline: ONNX detected {len(field_detections_list)} fields")
+                
+                # Fallback to YOLO if ONNX found nothing
+                if not field_detections_list and self._detector.field_detector_yolo.model is not None:
+                    raw_detections = self._detector.field_detector_yolo.detect(card_image, conf_threshold=0.25)
+                    field_detections_list = [
+                        {
+                            "class_id": d.class_id,
+                            "class_name": d.class_name,
+                            "confidence": d.confidence,
+                            "bbox": d.bbox,
+                        }
+                        for d in raw_detections
+                    ]
+                    logger.info(f"Pipeline: YOLO detected {len(field_detections_list)} fields")
+                
+                # Get cropped fields for OCR
                 yolo_fields = self._detector.crop_fields(card_image)
             except Exception as e:
                 logger.warning(f"Field detection failed: {e}")
@@ -365,6 +405,30 @@ class IDExtractionPipeline:
         # Use parallel processing
         extracted, confidence_scores = self._process_fields_parallel(yolo_fields)
 
+        # 6b. Combine address lines into single address field if needed
+        if "addressLine1" in extracted or "addressLine2" in extracted:
+            address_parts = []
+            address_conf = []
+            
+            if "addressLine1" in extracted and extracted["addressLine1"]:
+                address_parts.append(extracted["addressLine1"])
+                address_conf.append(confidence_scores.get("addressLine1", 0.5))
+            
+            if "addressLine2" in extracted and extracted["addressLine2"]:
+                address_parts.append(extracted["addressLine2"])
+                address_conf.append(confidence_scores.get("addressLine2", 0.5))
+            
+            if address_parts:
+                # Combine address lines
+                combined_address = " ".join(address_parts)
+                combined_conf = float(np.mean(address_conf)) if address_conf else 0.5
+                
+                # Store as 'address' field (or keep separate lines too)
+                if "address" not in extracted or not extracted["address"]:
+                    extracted["address"] = combined_address
+                    confidence_scores["address"] = combined_conf
+                    logger.info(f"Combined address lines: {combined_address}")
+
         # 7. Parse national ID
         parsed_info = None
         if "id_number" in extracted and extracted["id_number"]:
@@ -388,23 +452,7 @@ class IDExtractionPipeline:
             avg_conf = 0.0
 
         # Adjust confidence based on NID checksum validation
-        if parsed_info and parsed_info.valid:
-            if "id_number" in confidence_scores:
-                if parsed_info.checksum_valid:
-                    # Boost confidence if checksum is valid
-                    confidence_scores["id_number"] = min(
-                        1.0, confidence_scores.get("id_number", 0) + 0.15
-                    )
-                    logger.debug(f"NID checksum valid - boosted confidence")
-                else:
-                    # Reduce confidence if checksum invalid
-                    confidence_scores["id_number"] = max(
-                        0.0, confidence_scores.get("id_number", 0) - 0.20
-                    )
-                    logger.warning(f"NID checksum invalid - reduced confidence")
-            
-            # Recalculate overall confidence
-            avg_conf = float(np.mean(list(confidence_scores.values())))
+        # Checksum algorithm is inaccurate for Egyptian NID, ignoring confidence penalty.
 
         level = "high" if avg_conf > 0.85 else "medium" if avg_conf > 0.6 else "low"
 
@@ -418,6 +466,7 @@ class IDExtractionPipeline:
                 "level": level,
                 "per_field": confidence_scores,
             },
+            "field_detections": field_detections_list,  # Include all detected fields
             "processing_ms": processing_ms,
         }
 

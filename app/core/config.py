@@ -38,9 +38,11 @@ FIELD_ALIASES = {
 
 # OCR engine routing based on field type
 FIELD_OCR_CONFIG = {
-    "firstName": {"engine": "paddle", "lang": "ar"},
-    "lastName": {"engine": "paddle", "lang": "ar"},
-    "address": {"engine": "paddle", "lang": "ar"},
+    "firstName": {"engine": "paddle_vl", "lang": "ar"},  # PaddleOCR-VL-1.5 for Arabic
+    "lastName": {"engine": "paddle_vl", "lang": "ar"},
+    "address": {"engine": "paddle_vl", "lang": "ar"},
+    "addressLine1": {"engine": "paddle_vl", "lang": "ar"},
+    "addressLine2": {"engine": "paddle_vl", "lang": "ar"},
     "nid": {"engine": "easyocr", "digits_only": True},
     "serial": {"engine": "easyocr", "lang": "en"},
 }
@@ -86,6 +88,18 @@ class Settings(BaseSettings):
     PADDLE_DIGIT_REC_MODEL_DIR: str = Field(
         default="",
         description="Optional custom directory for digit/Latin PaddleOCR PP-OCRv4 rec model",
+    )
+    PADDLE_VL_USE_GPU: bool = Field(
+        default=True,
+        description="Use GPU for PaddleOCR-VL-1.5 if available",
+    )
+    PADDLE_VL_MODEL_PATH: str = Field(
+        default="PaddlePaddle/PaddleOCR-VL-1.5",
+        description="HuggingFace model path for PaddleOCR-VL-1.5",
+    )
+    PADDLE_VL_MAX_TOKENS: int = Field(
+        default=512,
+        description="Max tokens for PaddleOCR-VL-1.5 generation",
     )
     TESSDATA_DIR: str = Field(
         default="./weights",
