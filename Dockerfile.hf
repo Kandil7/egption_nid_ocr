@@ -1,0 +1,110 @@
+# Egyptian ID OCR - Hugging Face Spaces Docker Image
+# Optimized for HF Spaces free tier (2 vCPU, 16GB RAM, 50GB storage)
+# Based on python:3.11-slim for minimal size
+
+FROM python:3.11-slim-bookworm
+
+# Set environment variables for Python
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    # Reduce model cache sizes
+    TRANSFORMERS_CACHE=/tmp/transformers_cache \
+    HF_HOME=/tmp/huggingface \
+    PADDLE_HOME=/tmp/paddle \
+    # CPU optimization
+    OMP_NUM_THREADS=4 \
+    MKL_NUM_THREADS=4 \
+    OPENBLAS_NUM_THREADS=4 \
+    # Memory optimization
+    PYTHONMALLOC=malloc \
+    # Disable CUDA (CPU-only)
+    CUDA_VISIBLE_DEVICES=""
+
+# Set working directory
+WORKDIR /app
+
+# Install system dependencies for OpenCV and image processing
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    # OpenCV dependencies
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    libgomp1 \
+    libgcc-12-dev \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
+    # Image format support
+    libjpeg62-turbo \
+    libpng16-16 \
+    # Utilities
+    curl \
+    git \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+
+# Copy requirements first for better Docker layer caching
+COPY requirements.txt .
+
+# Create a minimal requirements file for HF Spaces (exclude dev dependencies)
+RUN grep -v "pytest\|httpx\|pytest-asyncio" requirements.txt > requirements-hf.txt
+
+# Install Python dependencies with pinned versions for reproducibility
+RUN pip install --upgrade pip setuptools wheel && \
+    pip install --no-cache-dir -r requirements-hf.txt && \
+    # Pre-download EasyOCR models to avoid runtime download
+    python -c "import easyocr; easyocr.Reader(['en','ar'], gpu=False, download_enabled=True)" && \
+    # Clear pip and transformer caches
+    rm -rf /root/.cache/pip /tmp/transformers_cache/*
+
+# Copy application code
+COPY app/ ./app/
+COPY scripts/ ./scripts/
+COPY weights/ ./weights/
+COPY models_cache/ ./models_cache/
+COPY PP-OCRv5_ar/ ./PP-OCRv5_ar/ 2>/dev/null || true
+
+# Copy environment file
+COPY .env.example .env
+
+# Create necessary directories with proper permissions
+RUN mkdir -p logs /tmp/transformers_cache /tmp/huggingface /tmp/paddle && \
+    chmod -R 777 logs /tmp
+
+# Health check endpoint
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:7860/api/v1/health || exit 1
+
+# Expose port (HF Spaces uses 7860)
+EXPOSE 7860
+
+# Entry point script for lazy model loading
+COPY <<EOF /entrypoint.sh
+#!/bin/bash
+set -e
+
+echo "=== Egyptian ID OCR - Starting ==="
+echo "Environment: \${APP_ENV:-production}"
+echo "Memory limit: \$(free -h | grep Mem | awk '{print \$2}')"
+echo "CPU cores: \$(nproc)"
+
+# Pre-warm models in background (non-blocking)
+if [ "\${HF_PREWARM_MODELS:-false}" = "true" ]; then
+    echo "Pre-warming models..."
+    python -c "from app.services.pipeline import IDExtractionPipeline; IDExtractionPipeline.initialize()" &
+fi
+
+# Start uvicorn with optimized settings for HF Spaces
+exec uvicorn app.main:app \
+    --host 0.0.0.0 \
+    --port 7860 \
+    --workers 1 \
+    --timeout-keep-alive 30 \
+    --log-level info
+EOF
+
+RUN chmod +x /entrypoint.sh
+
+# Set entrypoint
+ENTRYPOINT ["/entrypoint.sh"]

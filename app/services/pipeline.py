@@ -255,7 +255,7 @@ class IDExtractionPipeline:
             # Personal info
             "jobTitle", "job_title", "gender", "religion", "maritalStatus", "marital_status",
             # Other
-            "photo", "face", "frontLogo", "front_logo", "poe", "demo",
+            "poe", "demo",
         }
 
         # Filter to essential fields

@@ -106,7 +106,7 @@ async def visualize_fields(file: UploadFile = File(...)):
                 'firstName': 0, 'lastName': 1, 'addressLine1': 2, 'addressLine2': 3,
                 'nid': 4, 'nid_back': 5, 'serial': 6, 'expiryDate': 8,
                 'dateOfBirth': 16, 'jobTitle': 9, 'gender': 10, 'religion': 11,
-                'maritalStatus': 12, 'photo': 13, 'frontLogo': 14, 'address': 15,
+                'maritalStatus': 12, 'address': 15,
             }
             for class_name, (crop_img, conf) in fields_dict.items():
                 h, w = crop_img.shape[:2]
@@ -222,7 +222,7 @@ async def debug_detection(file: UploadFile = File(...)):
                 'firstName': 0, 'lastName': 1, 'addressLine1': 2, 'addressLine2': 3,
                 'nid': 4, 'nid_back': 5, 'serial': 6, 'expiryDate': 8,
                 'dateOfBirth': 16, 'jobTitle': 9, 'gender': 10, 'religion': 11,
-                'maritalStatus': 12, 'photo': 13, 'frontLogo': 14, 'address': 15,
+                'maritalStatus': 12, 'address': 15,
             }
             for class_name, (crop_img, conf) in fields_dict.items():
                 h, w = crop_img.shape[:2]

@@ -60,8 +60,6 @@ class ONNXFieldDetector:
         10: "gender",          # gender field
         11: "religion",        # religion field
         12: "marital_status",  # marital status field
-        13: "face",            # face photo region
-        14: "front_logo",      # front logo
         15: "address",         # general address field
         16: "dob",             # date of birth
     }
@@ -517,7 +515,7 @@ class EgyptianIDDetector:
         # Based on actual ONNX model metadata from weights/field_detector.onnx
         # Model class names: first_name, last_name, add_line_1, add_line_2, front_nid,
         #                    back_nid, serial_num, issue_code, expiry_date, job_title,
-        #                    gender, religion, marital_status, face, front_logo, address, dob
+        #                    gender, religion, marital_status, address, dob
         ONNX_TO_CANONICAL = {
             'first_name': 'firstName',
             'last_name': 'lastName',
@@ -533,16 +531,14 @@ class EgyptianIDDetector:
             'gender': 'gender',
             'religion': 'religion',
             'marital_status': 'maritalStatus',
-            'face': 'photo',
-            'front_logo': 'frontLogo',
             'address': 'address',
         }
 
         # YOLO (detect_odjects.pt) to canonical mapping
         # Based on NASO7Y model classes from config.py:
         # 0: "address", 1: "demo", 2: "dob", 3: "expiry", 4: "firstName",
-        # 5: "front_logo", 24: "lastName", 25: "nid", 26: "nid_back",
-        # 27: "photo", 28: "poe", 29: "serial", 30: "watermark_tut"
+        # 24: "lastName", 25: "nid", 26: "nid_back",
+        # 28: "poe", 30: "watermark_tut"
         YOLO_TO_CANONICAL = {
             'address': 'address',
             'firstName': 'firstName',
@@ -552,8 +548,6 @@ class EgyptianIDDetector:
             'serial': 'serial',
             'expiry': 'expiryDate',
             'dob': 'dateOfBirth',
-            'photo': 'photo',
-            'front_logo': 'frontLogo',
             'poe': 'address',  # Place of employment -> address
             'demo': 'demo',
             'watermark_tut': 'watermark_tut',
@@ -564,7 +558,7 @@ class EgyptianIDDetector:
             'firstName', 'lastName', 'nid', 'serial', 'address',
             'addressLine1', 'addressLine2',  # Address line fields
             'expiryDate', 'dateOfBirth', 'jobTitle', 'gender',
-            'religion', 'maritalStatus', 'photo', 'frontLogo',
+            'religion', 'maritalStatus',
             # Additional NASO7Y model classes
             'nid_back', 'demo', 'poe',
         }

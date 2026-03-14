@@ -1,0 +1,47 @@
+[Unit]
+Description=Egyptian ID OCR API Service
+Documentation=https://github.com/your-repo/egyptian-id-ocr
+After=network.target docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/egyptian-ocr
+
+# Environment variables
+Environment="APP_ENV=production"
+Environment="APP_PORT=8000"
+Environment="APP_WORKERS=2"
+Environment="LOG_LEVEL=INFO"
+Environment="OCR_CPU_THREADS=4"
+
+# Start command
+ExecStart=/usr/local/bin/docker-compose up -d
+
+# Stop command
+ExecStop=/usr/local/bin/docker-compose down
+
+# Reload command
+ExecReload=/usr/local/bin/docker-compose restart
+
+# Timeout settings
+TimeoutStartSec=300
+TimeoutStopSec=60
+
+# Restart policy
+Restart=on-failure
+RestartSec=30
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/egyptian-ocr/logs /opt/egyptian-ocr/models_cache
+
+# Resource limits
+LimitNOFILE=65535
+LimitNPROC=65535
+
+[Install]
+WantedBy=multi-user.target

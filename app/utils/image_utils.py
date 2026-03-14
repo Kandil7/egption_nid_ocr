@@ -262,8 +262,6 @@ FRONT_ROIS = {
     # Other fields
     "serial": (0.30, 0.65, 0.68, 0.10),
     "address": (0.05, 0.78, 0.90, 0.18),
-    # Logo placeholder
-    "front_logo": (0.85, 0.02, 0.13, 0.08),
 }
 
 # Back side fields
@@ -378,14 +376,6 @@ def preprocess_text_field(image: np.ndarray, field_type: str = "arabic") -> np.n
         if h < 64:
             scale = 64 / h
             gray = cv2.resize(gray, (int(w * scale), 64), interpolation=cv2.INTER_CUBIC)
-        return gray
-
-    elif field_type == "face":
-        # Photo: return original color
-        return cv2.cvtColor(image, cv2.COLOR_BGR2RGB) if len(image.shape) == 3 else image
-
-    elif field_type in ["front_logo", "back_logo"]:
-        # Logos: return grayscale
         return gray
 
     # Default: minimal processing
