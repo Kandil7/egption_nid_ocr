@@ -1,0 +1,113 @@
+# Egyptian ID OCR - Oracle Cloud Docker Image
+# Optimized for ARM64 (Oracle Cloud Ampere A1 instances)
+# Based on python:3.11-slim for minimal size
+
+FROM python:3.11-slim-bookworm
+
+# Set environment variables
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    # Model cache locations
+    TRANSFORMERS_CACHE=/tmp/transformers_cache \
+    HF_HOME=/tmp/huggingface \
+    PADDLE_HOME=/tmp/paddle \
+    # CPU optimization for ARM
+    OMP_NUM_THREADS=4 \
+    MKL_NUM_THREADS=4 \
+    OPENBLAS_NUM_THREADS=4 \
+    # Memory optimization
+    PYTHONMALLOC=malloc \
+    # Disable CUDA (CPU-only)
+    CUDA_VISIBLE_DEVICES=""
+
+# Set working directory
+WORKDIR /app
+
+# Install system dependencies for OpenCV and image processing
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    # OpenCV dependencies
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    libgomp1 \
+    libgcc-12-dev \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
+    # Image format support
+    libjpeg62-turbo \
+    libpng16-16 \
+    # Utilities
+    curl \
+    git \
+    # Tesseract OCR (optional fallback)
+    tesseract-ocr \
+    tesseract-ocr-eng \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+
+# Copy requirements first for better Docker layer caching
+COPY requirements.txt .
+
+# Create optimized requirements for production
+RUN grep -v "pytest\|httpx\|pytest-asyncio" requirements.txt > requirements-prod.txt
+
+# Install Python dependencies
+RUN pip install --upgrade pip setuptools wheel && \
+    pip install --no-cache-dir -r requirements-prod.txt && \
+    # Pre-download EasyOCR models
+    python -c "import easyocr; easyocr.Reader(['en','ar'], gpu=False, download_enabled=True)" && \
+    # Clear caches
+    rm -rf /root/.cache/pip /tmp/transformers_cache/*
+
+# Copy application code
+COPY app/ ./app/
+COPY scripts/ ./scripts/
+COPY weights/ ./weights/
+COPY models_cache/ ./models_cache/
+COPY PP-OCRv5_ar/ ./PP-OCRv5_ar/ 2>/dev/null || true
+
+# Copy environment file
+COPY .env.example .env
+
+# Create necessary directories
+RUN mkdir -p logs /tmp/transformers_cache /tmp/huggingface /tmp/paddle && \
+    chmod -R 777 logs /tmp
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:8000/api/v1/health || exit 1
+
+# Expose port
+EXPOSE 8000
+
+# Create startup script
+COPY <<'EOF' /start.sh
+#!/bin/bash
+set -e
+
+echo "=== Egyptian ID OCR - Starting ==="
+echo "Environment: ${APP_ENV:-production}"
+echo "Memory: $(free -h | grep Mem | awk '{print $2}')"
+echo "CPU cores: $(nproc)"
+
+# Pre-warm models if requested
+if [ "${PREWARM_MODELS:-false}" = "true" ]; then
+    echo "Pre-warming models..."
+    python -c "from app.services.pipeline import IDExtractionPipeline; IDExtractionPipeline.initialize()" &
+fi
+
+# Start uvicorn with production settings
+exec uvicorn app.main:app \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --workers ${APP_WORKERS:-2} \
+    --timeout-keep-alive 30 \
+    --log-level ${LOG_LEVEL:-info}
+EOF
+
+RUN chmod +x /start.sh
+
+# Set entrypoint
+ENTRYPOINT ["/start.sh"]

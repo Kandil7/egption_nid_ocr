@@ -1,0 +1,41 @@
+# Git LFS configuration for Egyptian ID OCR
+# Large model files should be tracked with Git LFS
+
+# YOLO model weights (*.pt files)
+*.pt filter=lfs diff=lfs merge=lfs -text
+*.pth filter=lfs diff=lfs merge=lfs -text
+*.onnx filter=lfs diff=lfs merge=lfs -text
+
+# PaddleOCR model files
+*.pdmodel filter=lfs diff=lfs merge=lfs -text
+*.pdiparams filter=lfs diff=lfs merge=lfs -text
+*.pdparams filter=lfs diff=lfs merge=lfs -text
+
+# Tesseract trained data
+*.traineddata filter=lfs diff=lfs merge=lfs -text
+
+# Compressed model archives
+*.zip filter=lfs diff=lfs merge=lfs -text
+*.tar.gz filter=lfs diff=lfs merge=lfs -text
+*.tar filter=lfs diff=lfs merge=lfs -text
+
+# Binary cache files
+*.bin filter=lfs diff=lfs merge=lfs -text
+*.index filter=lfs diff=lfs merge=lfs -text
+
+# Large image files for testing
+*.jpg filter=lfs diff=lfs merge=lfs -text
+*.png filter=lfs diff=lfs merge=lfs -text
+*.bmp filter=lfs diff=lfs merge=lfs -text
+*.webp filter=lfs diff=lfs merge=lfs -text
+
+# Note: Keep code files as regular Git files
+# *.py -text
+# *.md -text
+# *.txt -text
+# *.json -text
+# *.yaml -text
+# *.yml -text
+# *.sh -text
+# *.bat -text
+# Dockerfile* -text

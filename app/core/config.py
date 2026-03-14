@@ -20,9 +20,7 @@ NASO7Y_CLASSES = {
     1: "demo",
     2: "dob",
     3: "expiry",
-    5: "front_logo",
     26: "nid_back",
-    27: "photo",
     28: "poe",
     30: "watermark_tut",
 }
