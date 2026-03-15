@@ -13,6 +13,13 @@ from enum import Enum
 from dataclasses import dataclass
 from typing import Optional, Dict
 
+# WORKAROUND: Import torch BEFORE any paddle imports to prevent shm.dll / OpenMP conflicts on Windows.
+try:
+    import torch
+except ImportError:
+    pass
+
+
 from app.core.config import settings
 from app.core.logger import logger
 
@@ -260,31 +267,20 @@ class PaddleOCREngine:
             )
 
         try:
-            # PaddleOCR 3.x accepts numpy arrays directly
-            # Using .predict() method (PaddleOCR 3.x API)
-            result = self._ar_reader.predict(image_np)
+            # PaddleOCR 2.x API
+            result = self._ar_reader.ocr(image_np, cls=False)
             
-            # Extract text and confidence with RTL awareness
             blocks = []
-            for res in result:
-                # PaddleOCR 3.x returns result objects with dict() method
-                if hasattr(res, 'dict') and res.dict():
-                    res_dict = res.dict()
-                    # Extract text boxes and scores
-                    if 'rec_text' in res_dict and 'rec_score' in res_dict:
-                        blocks.append({
-                            "text": res_dict['rec_text'],
-                            "confidence": res_dict['rec_score'],
-                            "bbox": res_dict.get('dt_polys', [])
-                        })
-                elif hasattr(res, 'rec_text'):
-                    # Fallback for different result formats
+            # format: [[[[x,y],[x,y],[x,y],[x,y]], ('text', conf)], ...] 
+            if result and result[0]:
+                for line in result[0]:
+                    bbox = line[0]
+                    text_content, score = line[1]
                     blocks.append({
-                        "text": res.rec_text,
-                        "confidence": res.rec_score,
-                        "bbox": getattr(res, 'dt_polys', [])
+                        "text": text_content,
+                        "confidence": score,
+                        "bbox": bbox
                     })
-
             from app.utils.text_utils import sort_blocks_by_reading_direction
             text, conf = sort_blocks_by_reading_direction(blocks)
 
@@ -326,27 +322,19 @@ class PaddleOCREngine:
             )
 
         try:
-            # PaddleOCR 3.x API using .predict()
-            result = self._digit_reader.predict(image_np)
+            # PaddleOCR 2.x API
+            result = self._digit_reader.ocr(image_np, cls=False)
             
-            # Extract text and confidence
             blocks = []
-            for res in result:
-                if hasattr(res, 'dict') and res.dict():
-                    res_dict = res.dict()
-                    if 'rec_text' in res_dict and 'rec_score' in res_dict:
-                        blocks.append({
-                            "text": res_dict['rec_text'],
-                            "confidence": res_dict['rec_score'],
-                            "bbox": res_dict.get('dt_polys', [])
-                        })
-                elif hasattr(res, 'rec_text'):
+            if result and result[0]:
+                for line in result[0]:
+                    bbox = line[0]
+                    text_content, score = line[1]
                     blocks.append({
-                        "text": res.rec_text,
-                        "confidence": res.rec_score,
-                        "bbox": getattr(res, 'dt_polys', [])
+                        "text": text_content,
+                        "confidence": score,
+                        "bbox": bbox
                     })
-
             from app.utils.text_utils import sort_blocks_by_reading_direction
             text, conf = sort_blocks_by_reading_direction(blocks)
 

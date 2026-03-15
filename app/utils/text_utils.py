@@ -363,6 +363,11 @@ def sort_blocks_by_reading_direction(blocks: List[Dict]) -> Tuple[str, float]:
         for *_, b in line:
             txt = str(b.get("text", "")).strip()
             if txt:
+                # If RTL, the OCR usually outputs the characters in visual LTR order (completely backward).
+                # We must reverse the text in this block before joining.
+                if is_rtl:
+                    # Reverse the entire string for this block
+                    txt = txt[::-1]
                 final_texts.append(txt)
             if b.get("confidence") is not None:
                 confs.append(float(b["confidence"]))

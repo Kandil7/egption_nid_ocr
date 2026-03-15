@@ -25,9 +25,9 @@ from app.utils.image_utils import (
 )
 from app.utils.text_utils import (
     clean_field,
-    _reorder_arabic_tokens,
     normalize_arabic_text,
     _is_arabic_char,
+    sort_blocks_by_reading_direction,
 )
 from app.utils.cache import TTLCache, ocr_cache
 
@@ -341,15 +341,34 @@ class TestArabicReordering:
         assert "محمد" in result
         assert "Mohamed" in result
 
+    def test_single_word_reversal(self):
+        """Test if a single RTL block has its characters reversed."""
+        # "محمد" reversed visually is "دمحم"
+        blocks = [{"bbox": [0,0,10,10], "text": "دمحم", "confidence": 0.9}]
+        result, conf = sort_blocks_by_reading_direction(blocks)
+        assert result == "محمد"
+
+    def test_multi_word_blocks(self):
+        """Test if multiple RTL blocks keep correct order but reverse chars."""
+        # Visual reads LTR: rightmost is block 1, leftmost is block n
+        # Let's say rightmost block is x=100 (Abd), leftmost x=0 (Deif)
+        blocks = [
+            {"bbox": [100,0,120,10], "text": "دبع", "confidence": 0.9},
+            {"bbox": [80,0,90,10], "text": "يحلاد", "confidence": 0.9},
+            {"bbox": [60,0,70,10], "text": "يلع", "confidence": 0.9},
+            {"bbox": [40,0,50,10], "text": "هط", "confidence": 0.9},
+            {"bbox": [0,0,20,10], "text": "فيض", "confidence": 0.9},
+        ]
+        result, conf = sort_blocks_by_reading_direction(blocks)
+        # It should sort by x_max descending (RTL order), then reverse chars in each.
+        # Order: "دبع", "يحلاد", "يلع", "هط", "فيض"
+        # Reversed: "عبد دالحي علي طه ضيف"
+        assert result == "عبد دالحي علي طه ضيف"
+
     def test_empty_string(self):
         """Test empty string handling."""
-        assert _reorder_arabic_tokens("") == ""
-        assert _reorder_arabic_tokens(None) is None
-
-    def test_single_word(self):
-        """Test single word (character reversal only)."""
-        assert _reorder_arabic_tokens("دمحم") == "محمد"
-        assert _reorder_arabic_tokens("محمد") == "دمحم"  # Already correct gets reversed
+        result, conf = sort_blocks_by_reading_direction([])
+        assert result == ""
 
 
 class TestArabicNormalization:
